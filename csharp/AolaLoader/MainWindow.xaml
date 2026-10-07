@@ -1,0 +1,223 @@
+<Window x:Class="AolaLoader.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Aola Loader" WindowState="Maximized" MinWidth="1280" MinHeight="760"
+        Loaded="Window_Loaded" Closing="Window_Closing">
+  <Grid Margin="18">
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="280" />
+      <ColumnDefinition Width="12" />
+      <ColumnDefinition Width="*" MinWidth="520" />
+      <ColumnDefinition Width="12" />
+      <ColumnDefinition Width="340" MinWidth="300" />
+    </Grid.ColumnDefinitions>
+
+    <!-- Accounts -->
+    <Border Grid.Column="0" Style="{StaticResource CardStyle}">
+      <Grid>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <TextBlock Text="登录账号" FontSize="22" FontWeight="SemiBold" />
+        <TextBlock Grid.Row="1" Text="点击账号即可选择或取消" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,5,0,15" />
+
+        <ListBox x:Name="AccountList" Grid.Row="2" ItemsSource="{Binding Accounts}"
+                 SelectionMode="Multiple" BorderThickness="0" Background="Transparent"
+                 PreviewMouseLeftButtonDown="AccountList_PreviewMouseLeftButtonDown">
+          <ListBox.ItemContainerStyle>
+            <Style TargetType="ListBoxItem">
+              <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+              <Setter Property="Padding" Value="0" />
+              <Setter Property="Margin" Value="0,0,0,8" />
+              <Setter Property="Background" Value="Transparent" />
+              <Setter Property="BorderThickness" Value="0" />
+              <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                  <Setter Property="Background" Value="#E8F2FF" />
+                </Trigger>
+              </Style.Triggers>
+            </Style>
+          </ListBox.ItemContainerStyle>
+          <ListBox.ItemTemplate>
+            <DataTemplate>
+              <Border CornerRadius="11" Background="{Binding RelativeSource={RelativeSource AncestorType=ListBoxItem}, Path=Background}" Padding="12">
+                <Grid>
+                  <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                  <TextBlock Text="{Binding Label}" FontWeight="SemiBold" VerticalAlignment="Center" />
+                  <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Ellipse Width="8" Height="8" Margin="0,0,6,0">
+                      <Ellipse.Style>
+                        <Style TargetType="Ellipse">
+                          <Setter Property="Fill" Value="#AEAEB2" />
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding Status}" Value="在线"><Setter Property="Fill" Value="{StaticResource GreenBrush}" /></DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </Ellipse.Style>
+                    </Ellipse>
+                    <TextBlock Text="{Binding Status}" Foreground="{StaticResource SecondaryTextBrush}" />
+                  </StackPanel>
+                </Grid>
+              </Border>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+
+        <UniformGrid Grid.Row="3" Columns="2" Margin="0,12,0,6">
+          <Button Content="选择全部" Click="SelectAll_Click" />
+          <Button Content="取消全选" Click="ClearSelection_Click" Margin="0,0,0,8" />
+        </UniformGrid>
+
+        <StackPanel Grid.Row="4">
+          <WrapPanel>
+            <Button Content="新增" Click="AddAccount_Click" />
+            <Button Content="编辑" Click="EditAccount_Click" />
+            <Button Content="删除" Style="{StaticResource DangerButton}" Click="DeleteAccount_Click" />
+          </WrapPanel>
+          <WrapPanel>
+            <Button x:Name="ConnectSelectedButton" Content="连接已选" Style="{StaticResource PrimaryButton}" Click="ConnectSelected_Click" />
+            <Button x:Name="ConnectAllButton" Content="连接全部" Click="ConnectAll_Click" />
+            <Button x:Name="ReconnectSelectedButton" Content="重连已选" Click="ReconnectSelected_Click" />
+            <Button x:Name="DisconnectSelectedButton" Content="断开已选" Click="DisconnectSelected_Click" />
+            <Button x:Name="DisconnectAllButton" Content="断开全部" Click="DisconnectAll_Click" />
+          </WrapPanel>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Work area -->
+    <Border Grid.Column="2" Style="{StaticResource CardStyle}">
+      <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+        <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+          <TextBlock Text="脚本序列" FontSize="22" FontWeight="SemiBold" VerticalAlignment="Center" />
+          <Border Grid.Column="1" Background="#EFEFF4" CornerRadius="10" Padding="3">
+            <StackPanel Orientation="Horizontal">
+              <Button x:Name="MessagesTab" Content="通用消息" Background="{StaticResource BlueBrush}" Foreground="White" Margin="0" Click="MessagesTab_Click" />
+              <Button x:Name="ScriptsTab" Content="专用脚本" Margin="3,0,0,0" Click="ScriptsTab_Click" />
+              <Button x:Name="CombinationTab" Content="组合任务" Margin="3,0,0,0" Click="CombinationTab_Click" />
+            </StackPanel>
+          </Border>
+        </Grid>
+
+        <Grid Grid.Row="1" Margin="0,20,0,0">
+          <!-- Generic messages -->
+          <Grid x:Name="MessagesPanel">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" /><RowDefinition Height="140" /><RowDefinition Height="Auto" />
+              <RowDefinition Height="*" /><RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <TextBlock Text="消息用 | 分隔；#wait 等待战斗结束，#time = 秒数 暂停。支持粘贴或 UTF-8 文件。" Foreground="{StaticResource SecondaryTextBrush}" Margin="2,0,0,8" />
+            <TextBox x:Name="MessageInput" Grid.Row="1" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" VerticalContentAlignment="Top" />
+            <WrapPanel Grid.Row="2" Margin="0,10,0,2">
+              <Button Content="解析粘贴内容" Click="ParseMessage_Click" />
+              <Button Content="选择消息文件…" Click="ChooseMessageFile_Click" />
+              <Button Content="清空" Click="ClearMessages_Click" />
+            </WrapPanel>
+            <DataGrid Grid.Row="3" ItemsSource="{Binding Messages}" IsReadOnly="True" CanUserAddRows="False" Margin="0,5,0,12">
+              <DataGrid.Columns>
+                <DataGridTextColumn Header="顺序" Binding="{Binding Sequence}" Width="80" />
+                <DataGridTextColumn Header="Extension ID" Binding="{Binding ExtensionId}" Width="140" />
+                <DataGridTextColumn Header="命令" Binding="{Binding Cmd}" Width="*" />
+              </DataGrid.Columns>
+            </DataGrid>
+            <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+              <Button Content="取消发送" Style="{StaticResource DangerButton}" Click="CancelSend_Click" />
+              <Button Content="确认并发送" Style="{StaticResource PrimaryButton}" Click="SendMessages_Click" Margin="0" />
+            </StackPanel>
+          </Grid>
+
+          <!-- Scripts -->
+          <Grid x:Name="ScriptsPanel" Visibility="Collapsed">
+            <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+            <ListBox x:Name="ScriptList" ItemsSource="{Binding Scripts}" BorderThickness="0" Background="Transparent">
+              <ListBox.ItemTemplate>
+                <DataTemplate>
+                  <Border BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="12" Padding="16" Margin="0,0,0,10">
+                    <StackPanel>
+                      <TextBlock Text="{Binding Name}" FontSize="16" FontWeight="SemiBold" />
+                      <TextBlock Text="{Binding Description}" Foreground="{StaticResource SecondaryTextBrush}" TextWrapping="Wrap" Margin="0,6,0,0" />
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+            <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right">
+              <Button Content="取消脚本" Style="{StaticResource DangerButton}" Click="CancelScript_Click" />
+              <Button Content="确认并运行" Style="{StaticResource PrimaryButton}" Click="RunScript_Click" Margin="0" />
+            </StackPanel>
+          </Grid>
+
+          <!-- Combination -->
+          <Grid x:Name="CombinationPanel" Visibility="Collapsed">
+            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+            <WrapPanel>
+              <Button Content="添加当前通用消息" Click="AddMessagesStep_Click" />
+              <ComboBox x:Name="CombinationScript" ItemsSource="{Binding Scripts}" DisplayMemberPath="Name" Width="220" Margin="0,0,8,8" />
+              <Button Content="添加专用脚本" Click="AddScriptStep_Click" />
+            </WrapPanel>
+            <ListBox x:Name="CombinationList" Grid.Row="1" ItemsSource="{Binding CombinationSteps}" BorderBrush="{StaticResource BorderBrush}" Margin="0,4,0,10">
+              <ListBox.ItemTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding Description}" Padding="10" />
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+            <WrapPanel Grid.Row="2">
+              <Button Content="上移" Click="MoveStepUp_Click" />
+              <Button Content="下移" Click="MoveStepDown_Click" />
+              <Button Content="移除" Click="RemoveStep_Click" />
+              <Button Content="清空" Click="ClearSteps_Click" />
+              <TextBlock Text="完整执行次数" VerticalAlignment="Center" Margin="12,0,8,8" Foreground="{StaticResource SecondaryTextBrush}" />
+              <TextBox x:Name="RepetitionsBox" Text="1" Width="55" Margin="0,0,12,8" />
+              <TextBlock Text="轮间隔（秒）" VerticalAlignment="Center" Margin="0,0,8,8" Foreground="{StaticResource SecondaryTextBrush}" />
+              <TextBox x:Name="IntervalBox" Text="0.5" Width="65" Margin="0,0,0,8" />
+            </WrapPanel>
+            <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+              <Button Content="取消组合任务" Style="{StaticResource DangerButton}" Click="CancelCombination_Click" />
+              <Button Content="确认并执行" Style="{StaticResource PrimaryButton}" Click="RunCombination_Click" Margin="0" />
+            </StackPanel>
+          </Grid>
+        </Grid>
+      </Grid>
+    </Border>
+
+    <!-- User-facing log -->
+    <Border Grid.Column="4" Style="{StaticResource CardStyle}">
+      <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+        <Grid>
+          <TextBlock Text="运行日志" FontSize="22" FontWeight="SemiBold" />
+          <Button Content="清空" HorizontalAlignment="Right" Padding="12,5" Margin="0" Click="ClearLog_Click" />
+        </Grid>
+        <TextBlock Grid.Row="1" Text="连接、发送、异常与脚本输出" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,6,0,15" />
+        <ListBox x:Name="LogList" Grid.Row="2" ItemsSource="{Binding Logs}" BorderThickness="0" Background="Transparent" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+          <ListBox.ItemTemplate>
+            <DataTemplate>
+              <Border BorderBrush="#EEEEF2" BorderThickness="0,0,0,1" Padding="0,9">
+                <StackPanel>
+                  <TextBlock Text="{Binding Time}" FontSize="11" Foreground="{StaticResource SecondaryTextBrush}" />
+                  <TextBlock Text="{Binding Message}" TextWrapping="Wrap" Margin="0,3,0,0">
+                    <TextBlock.Style>
+                      <Style TargetType="TextBlock">
+                        <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+                        <Style.Triggers>
+                          <DataTrigger Binding="{Binding Category}" Value="error"><Setter Property="Foreground" Value="{StaticResource RedBrush}" /></DataTrigger>
+                        </Style.Triggers>
+                      </Style>
+                    </TextBlock.Style>
+                  </TextBlock>
+                </StackPanel>
+              </Border>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>

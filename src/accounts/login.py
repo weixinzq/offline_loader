@@ -1,0 +1,341 @@
+"""
+login.py — HTTP 登录、响应解析和服务器列表模型
+"""
+from __future__ import annotations
+import asyncio
+import hashlib
+import json
+import re
+import urllib.parse
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Optional
+import aiohttp
+
+from src.accounts.browser_login import browser_login, is_captcha_page
+from src.config import PROJECT_ROOT, load_user_config, default_config
+
+
+@dataclass
+class ZoneData:
+    zone_index: int
+    zone_name: str
+    host: str
+    port: int
+    flash_port: int = 0
+    user_num: int = 0
+    is_new: bool = False
+    is_hot: bool = False
+    domain: str = ""
+
+
+@dataclass
+class LoginResult:
+    success: bool
+    user_id: str = ""
+    duoduo_id: str = ""
+    session_id: str = ""
+    zone_list: list[ZoneData] = field(default_factory=list)
+    error_msg: str = ""
+
+
+@dataclass(frozen=True)
+class RoleInfo:
+    char_id: int
+    user_id: str
+    nickname: str
+
+
+def _get_element_text(element, key: str) -> str:
+    children = element.findall(key)
+    if not children:
+        return ""
+    child = children[0]
+    text = child.text
+    if text is None:
+        text = ''.join(child.itertext()).strip()
+    return text or ""
+
+
+def md5_password(password: str) -> str:
+    return hashlib.md5(password.encode('utf-8')).hexdigest()
+
+
+def parse_role_response(text: str) -> list[RoleInfo]:
+    roles: list[RoleInfo] = []
+    seen_char_ids: set[int] = set()
+    for index, raw_role in enumerate(text.split("|"), start=1):
+        raw_role = raw_role.strip()
+        if not raw_role:
+            continue
+        parts = raw_role.split(",", 3)
+        if len(parts) < 3:
+            raise ValueError(f"角色列表第 {index} 项格式错误")
+        try:
+            char_id = int(parts[0])
+        except ValueError as exc:
+            raise ValueError(f"角色列表第 {index} 项 charId 无效") from exc
+        user_id = parts[1].strip()
+        nickname = parts[2].strip()
+        if char_id < 0 or not user_id or not nickname:
+            raise ValueError(f"角色列表第 {index} 项字段无效")
+        if char_id in seen_char_ids:
+            raise ValueError(f"角色列表包含重复 charId={char_id}")
+        seen_char_ids.add(char_id)
+        roles.append(RoleInfo(char_id, user_id, nickname))
+    if not roles:
+        raise ValueError("账号没有可用角色")
+    return roles
+
+
+def select_role(roles: list[RoleInfo], char_id: int) -> RoleInfo:
+    role = next((item for item in roles if item.char_id == char_id), None)
+    if role is None:
+        available = "、".join(str(item.char_id) for item in roles)
+        raise ValueError(f"配置的 charId={char_id} 不存在；可用值：{available}")
+    return role
+
+
+def build_login_params(account: str, password: str, char_id: int) -> dict[str, str]:
+    return {
+        "account": account,
+        "password": md5_password(password),
+        "charId": str(char_id),
+        "logintype": "",
+        "wyToken": "",
+        "fromurl": "",
+        "webSite": "",
+        "token": "",
+        "cookieId": "",
+        "pi": "",
+        "sessionId": "",
+        "content": "",
+    }
+
+
+def parse_login_response(xml_text: str) -> LoginResult:
+    try:
+        root = ET.fromstring(xml_text)
+        result_code = _get_element_text(root, "c")
+
+        if result_code != "ok":
+            error_msgs = {
+                "freeze": "账号异常，已被冻结！",
+                "error": "网络或服务器发生错误",
+                "invalid": "用户名或密码错误！",
+                "busy": "服务器繁忙",
+                "maintain": "系统维护中",
+            }
+            return LoginResult(success=False, error_msg=error_msgs.get(result_code, f"Error:{result_code}"))
+
+        duoduo_id = _get_element_text(root, "d") or _get_element_text(root, "ddid")
+        player_id = _get_element_text(root, "u")
+        session_id = _get_element_text(root, "sid")
+
+        svr_text = _get_element_text(root, "svr")
+        zn_text = _get_element_text(root, "zn")
+
+        server_list = [s for s in svr_text.split(";") if s.strip()]
+        zone_info_list = [z for z in zn_text.split(";") if z.strip()]
+
+        zone_list = []
+        for zone_info in zone_info_list:
+            parts = zone_info.split("/")
+            if len(parts) < 5:
+                continue
+            zone_names = parts[0].split(" ")
+            zone_index = int(zone_names[0])
+            server_idx = int(parts[1])
+            if server_idx >= len(server_list):
+                continue
+            server = server_list[server_idx]
+            server_parts = server.split(":")
+            if len(server_parts) < 4:
+                continue
+            host = server_parts[0]
+            flash_port = int(server_parts[1])
+            h5_port = int(server_parts[2])
+            domain = server_parts[3]
+            if flash_port <= 0 and h5_port <= 0:
+                continue
+            if zone_index >= 100000:
+                continue
+            zone_list.append(ZoneData(
+                zone_index=zone_index,
+                zone_name=zone_names[1] if len(zone_names) > 1 else "",
+                host=host,
+                port=h5_port,
+                flash_port=flash_port,
+                user_num=int(parts[6]) if len(parts) > 6 and parts[6].replace('-', '').strip() else 0,
+                is_new=parts[3] == "1" if len(parts) > 3 else False,
+                is_hot=parts[4] == "1" if len(parts) > 4 else False,
+                domain=domain,
+            ))
+
+        zone_list.sort(key=lambda z: z.user_num)
+
+        return LoginResult(
+            success=True,
+            user_id=player_id,
+            duoduo_id=duoduo_id,
+            session_id=session_id,
+            zone_list=zone_list,
+        )
+    except ET.ParseError as e:
+        return LoginResult(success=False, error_msg=f"XML parse error: {e}")
+
+
+def _save_login_failure(stage, request_url, response, body, error, account, password):
+    def redact(text):
+        for value in (md5_password(password), urllib.parse.quote_plus(password), password, account):
+            if value:
+                text = text.replace(value, "[REDACTED]")
+        text = re.sub(
+            r"(<(?:sid|token|sessionId|password)\b[^>]*>).*?(</(?:sid|token|sessionId|password)\s*>)",
+            r"\1[REDACTED]\2", text, flags=re.IGNORECASE | re.DOTALL,
+        )
+        return re.sub(
+            r'''(["']?\b(?:sid|token|session_?id|password|pwd|wyToken)["']?\s*[:=]\s*["']?)[^"'\s<>&;,}]+''',
+            r"\1[REDACTED]", text, flags=re.IGNORECASE,
+        )
+
+    def safe_url(url):
+        parts = urllib.parse.urlsplit(str(url))
+        return redact(urllib.parse.urlunsplit((
+            parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", "",
+        )))
+
+    text = body.decode("utf-8", errors="replace")
+    markers = [marker for marker in ("TCaptcha.js", "TencentCaptcha", "/WafCaptcha")
+               if marker.lower() in text.lower()]
+    status = response.status if response is not None else None
+    if markers:
+        analysis = "疑似 WAF 人机验证页面（检测到腾讯验证码标记）"
+    elif status == 429:
+        analysis = "HTTP 429：请求受到限流"
+    elif re.search(r"<!doctype\s+html|<html\b|<script\b", text, re.IGNORECASE):
+        analysis = "收到 HTML/脚本页面，而非预期的登录数据"
+    elif status is not None and status >= 400:
+        analysis = f"HTTP {status}：请求失败"
+    else:
+        analysis = "角色查询或登录失败，详见错误与响应正文"
+    now = datetime.now(timezone.utc)
+    output_dir = PROJECT_ROOT / "evidence" / "login-failures"
+    name = f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{stage}"
+    metadata_path = output_dir / f"{name}.json"
+    body_path = output_dir / f"{name}.response.txt"
+    metadata = {
+        "captured_at_utc": now.isoformat(),
+        "stage": stage,
+        "method": "POST",
+        "request_url": safe_url(request_url),
+        "final_url": safe_url(response.url) if response is not None else None,
+        "http_status": status,
+        "content_type": response.headers.get("Content-Type", "") if response is not None else "",
+        "retry_after": response.headers.get("Retry-After", "") if response is not None else "",
+        "redirects": [
+            {"status": item.status, "url": safe_url(item.url)}
+            for item in response.history
+        ] if response is not None else [],
+        "body_bytes": len(body),
+        "response_file": body_path.name,
+        "response_redacted": True,
+        "analysis": analysis,
+        "captcha_markers": markers,
+        "error": redact(error),
+    }
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        body_path.write_text(redact(text), encoding="utf-8")
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        return f"{redact(error)}；诊断保存失败：{exc}"
+    return f"{redact(error)}；{analysis}；诊断文件：{metadata_path}"
+
+
+async def http_login(
+    account: str,
+    password: str,
+    char_id: int = 0,
+    login_url: Optional[str] = None,
+    register_url: Optional[str] = None,
+    browser_verification: bool = False,
+) -> LoginResult:
+    """Query the configured role and return the selected role's login result."""
+    conf = load_user_config()
+    if login_url is None:
+        login_url = conf.get("login_url", default_config()["login_url"])
+    if register_url is None:
+        register_url = conf.get(
+            "register_url", default_config()["register_url"]
+        )
+    if isinstance(char_id, bool) or not isinstance(char_id, int) or char_id < 0:
+        return LoginResult(success=False, error_msg="charId 必须是非负整数")
+
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Origin": "https://aola.100bt.com",
+        "Referer": "https://aola.100bt.com/",
+    }
+
+    stage = "role_query"
+    request_url = register_url
+    response = None
+    response_body = b""
+    try:
+        async with aiohttp.ClientSession() as session:
+            role_body = urllib.parse.urlencode(
+                {"type": "query_role_info", "duoduoId": account}
+            )
+            async with session.post(
+                register_url,
+                data=role_body,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=2),   #
+            ) as resp:
+                response = resp
+                response_body = await resp.read()
+                resp.raise_for_status()
+                role_text = response_body.decode("utf-8", errors="replace")
+            role = select_role(parse_role_response(role_text), char_id)
+
+            body = urllib.parse.urlencode(
+                build_login_params(account, password, char_id)
+            )
+            stage = "login"
+            request_url = login_url
+            response = None
+            response_body = b""
+            async with session.post(
+                login_url, data=body, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                response = resp
+                response_body = await resp.read()
+                resp.raise_for_status()
+                xml_text = response_body.decode("utf-8", errors="replace")
+            result = parse_login_response(xml_text)
+            if result.success and result.user_id != role.user_id:
+                result = LoginResult(
+                    success=False,
+                    error_msg=(
+                        f"角色校验失败：charId={char_id} 应为 userId="
+                        f"{role.user_id}，服务器返回 {result.user_id or '空'}"
+                    ),
+                )
+    except ValueError as e:
+        result = LoginResult(success=False, error_msg=str(e))
+    except aiohttp.ClientError as e:
+        result = LoginResult(success=False, error_msg=f"HTTP error: {e}")
+    except asyncio.TimeoutError:
+        result = LoginResult(success=False, error_msg="Login request timed out")
+    if not result.success:
+        result.error_msg = _save_login_failure(
+            stage, request_url, response, response_body, result.error_msg, account, password
+        )
+        if browser_verification and is_captcha_page(response_body.decode("utf-8", errors="replace")):
+            print(f"[登录验证] {result.error_msg}", flush=True)
+            return await browser_login(account, password, char_id, login_url, register_url)
+    return result

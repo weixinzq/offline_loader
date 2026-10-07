@@ -1,0 +1,16 @@
+{
+  "login_url": "https://login-aola.100bt.com/newLogin.jsp",
+  "register_url": "https://service-aola.100bt.com/newRegister.jsp",
+  "platform": "CN_H5",
+  "timeout": 30,
+  "accounts": [
+    {
+      "label": "测试 1",
+      "account": "your_account",
+      "password": "your_password",
+      "char_id": 0,
+      "zone_index": 1025
+    }    
+  ]
+
+}
