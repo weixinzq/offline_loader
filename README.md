@@ -44,7 +44,6 @@ dist/AolaLoader/AolaBackend.exe
 dist/AolaLoader/config.example.json
 ```
 
-构建产物和 `config.json` 均由 `.gitignore` 排除，不会误提交凭据。
 
 调试工具保留在 `scripts/debug/`，以模块方式运行，例如：
 
