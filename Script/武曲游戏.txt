@@ -1,0 +1,3 @@
+#send={"id":42,"param":{},"cmd":"WQAPG261009_1"}|
+#send={"id":42,"param":{"num":100},"cmd":"WQAPG261009_3"}|
+#send={"id":42,"param":{},"cmd":"WQAPG261009_0"}|

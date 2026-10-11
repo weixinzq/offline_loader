@@ -100,8 +100,20 @@ class GameSocket:
                 print("[TCP] Policy read timeout — continuing")
             print(f"[TCP] Connected to {host}:{port}")
             return True
+        except asyncio.IncompleteReadError as e:
+            self.disconnect_reason = (
+                f"TCP 安全策略读取时连接提前关闭：期望 {e.expected} 字节，"
+                f"收到 {len(e.partial)} 字节"
+            )
+            await self.close()
+            print(f"[TCP] Connection failed: {self.disconnect_reason}")
+            return False
+        except asyncio.CancelledError:
+            await self.close()
+            raise
         except (OSError, asyncio.TimeoutError) as e:
             self.disconnect_reason = f"TCP 连接失败: {type(e).__name__}: {e}"
+            await self.close()
             print(f"[TCP] Connection failed: {e}")
             return False
 
@@ -647,31 +659,31 @@ async def login_and_connect(
 ) -> GameSocket | None:
     """完整登录流程: TCP 或 WebSocket → 发送登录包 → 接收 logOK"""
     sock = GameSocket(session_id)
-
-
-   # 策略 2: 原始 TCP (Flash port)
-    tcp_port = zone.flash_port or zone.port
-    if await sock.connect_tcp(zone.host, tcp_port, timeout):
-        resp = await sock.login(
-            f"{zone.zone_index} {zone.zone_name}",
-            user_id, session_id
-        )
-        if resp is not None:
-            return sock
-        await sock.close()
-
-    
- 
-    # 策略 1: WebSocket (H5 domain:port)
-    if zone.domain and zone.port > 0:
-        if await sock.connect_ws(zone.domain, zone.port, timeout):
+    retained = False
+    try:
+        # 策略 2: 原始 TCP (Flash port)
+        tcp_port = zone.flash_port or zone.port
+        if await sock.connect_tcp(zone.host, tcp_port, timeout):
             resp = await sock.login(
                 f"{zone.zone_index} {zone.zone_name}",
                 user_id, session_id
             )
             if resp is not None:
+                retained = True
                 return sock
             await sock.close()
 
-
-    return None
+        # 策略 1: WebSocket (H5 domain:port)
+        if zone.domain and zone.port > 0:
+            if await sock.connect_ws(zone.domain, zone.port, timeout):
+                resp = await sock.login(
+                    f"{zone.zone_index} {zone.zone_name}",
+                    user_id, session_id
+                )
+                if resp is not None:
+                    retained = True
+                    return sock
+        return None
+    finally:
+        if not retained:
+            await sock.close()

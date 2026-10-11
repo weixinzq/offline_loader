@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import logging
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Awaitable
 
@@ -16,6 +17,7 @@ from src.accounts.manager import (
     load_account_specs,
 )
 from src.config import CONFIG_PATH, default_config, load_user_config
+from src.accounts.session import open_context
 from src.messaging.audit_log import append_send_results
 from src.messaging.dispatcher import dispatch_to_accounts
 from src.messaging.parser import (
@@ -26,9 +28,12 @@ from src.messaging.parser import (
 from src.scripting.composer import MessageBatchStep, ScriptStep, execute_combination_for_accounts
 from src.scripting.loader import InteractionScript, discover_scripts
 from src.ipc.named_pipe import NamedPipeTransport
+from src.ui.runtime_log import get_runtime_log_path
 
 
 logger = logging.getLogger(__name__)
+LOGIN_CONCURRENCY = 5
+LOGIN_START_INTERVAL = 0.5
 
 
 class BridgeError(ValueError):
@@ -61,6 +66,7 @@ class DesktopBridge:
         self.task_labels: dict[str, set[str]] = {}
         self._last_statuses: tuple[tuple[str, str], ...] = ()
         self._stopping = False
+        self._connection_action = ""
 
     async def run(self) -> None:
         monitor = asyncio.create_task(self._monitor_accounts())
@@ -131,12 +137,21 @@ class DesktopBridge:
             return await self._mutate_account(action, payload)
         if action in {"connect", "reconnect", "disconnect"}:
             labels = self._labels(payload)
+            current = self.tasks.get("connection")
+            if (action == "disconnect" and current is not None and not current.done()
+                    and self._connection_action != "disconnect"):
+                current.cancel()
+                await asyncio.gather(current, return_exceptions=True)
+                if self.tasks.get("connection") is current:
+                    self.tasks.pop("connection", None)
+                    self.task_labels.pop("connection", None)
             self._ensure_labels_idle(labels)
             self._start_task(
                 "connection",
                 labels,
                 self._run_connection_action(action, labels),
             )
+            self._connection_action = action
             return {"started": True}
         if action == "parse_message":
             self.messages = tuple(
@@ -321,56 +336,212 @@ class DesktopBridge:
         temporary.replace(CONFIG_PATH)
 
     async def _run_connection_action(self, action: str, labels: list[str]) -> None:
+        completed = 0
+        skipped = 0
+        errors: list[str] = []
+        start_lock = asyncio.Lock()
+        next_start = 0.0
+        pause_reason = ""
+        verification_lock = asyncio.Lock()
+        verification_ready = asyncio.Event()
+        verification_ready.set()
+        verification_waiters = 0
+
+        def pause(reason: str) -> None:
+            nonlocal pause_reason
+            if not pause_reason:
+                pause_reason = reason
+                for task in workers:
+                    if task is not asyncio.current_task() and not task.done():
+                        task.cancel()
+
+        async def verify_manually(connection) -> bool:
+            nonlocal verification_waiters
+            verification_waiters += 1
+            verification_ready.clear()
+            try:
+                async with verification_lock:
+                    if pause_reason:
+                        return False
+                    label = connection.spec.label
+                    await self._log(
+                        f"账号 {label} 需要人工验证：登录队列等待中，请在打开的 Edge 窗口完成官方验证；"
+                        "完成后自动继续，关闭窗口或点击断开全部可停止。",
+                        "connection",
+                    )
+
+                    async def opener(config):
+                        connection.state = "等待人工验证"
+                        return await open_context(config, interactive=True)
+
+                    success = await connection.connect(opener=opener, retries=1)
+                    if success:
+                        await self._log(f"账号 {label} 人工验证后的连接已建立，继续初始化及后续登录。", "connection")
+                    else:
+                        pause("人工验证或后续登录未完成")
+                    return success
+            finally:
+                verification_waiters -= 1
+                if verification_waiters == 0:
+                    verification_ready.set()
+
         async def run_one(label: str) -> None:
+            nonlocal completed, skipped, next_start, pause_reason
             connection = self._connection(label)
             try:
                 if action == "disconnect":
+                    if connection.context is None:
+                        skipped += 1
+                        return
                     await connection.disconnect()
-                    await self._log(f"账号 {label} 已断开", "connection")
+                    completed += 1
                     return
+                if action == "connect" and connection.online:
+                    skipped += 1
+                    return
+                async with start_lock:
+                    await verification_ready.wait()
+                    loop = asyncio.get_running_loop()
+                    while next_start > loop.time():
+                        await asyncio.sleep(max(0.001, next_start - loop.time()))
+                    await verification_ready.wait()
+                    if pause_reason:
+                        return
+                    next_start = loop.time() + LOGIN_START_INTERVAL
                 if action == "reconnect":
                     await connection.disconnect()
                 success = await connection.connect()
+                if not success and getattr(connection, "login_block_reason", "") == "登录需要人机验证":
+                    success = await verify_manually(connection)
                 if success and connection.context is not None:
                     connection.context.log_callback = (
                         lambda message, account=label: self._schedule_log(
                             f"账号 {account}：{message}", "script"
                         )
                     )
-                    await self._log(f"账号 {label} 已连接", "connection")
+                    await connection.context.wait_for_player_initialization()
+                    completed += 1
                 else:
-                    await self._log(
-                        f"账号 {label} 连接失败：{connection.last_error}", "error"
-                    )
+                    message = f"账号 {label} 连接失败：{connection.last_error}"
+                    errors.append(message)
+                    logger.warning(message)
+                    blocked = getattr(connection, "login_block_reason", "")
+                    if blocked:
+                        pause(blocked)
+            except asyncio.CancelledError:
+                if action != "disconnect" and connection.context is not None:
+                    await connection.disconnect()
+                    connection.state = "已取消"
+                raise
             except Exception as exc:
-                await self._log(f"账号 {label} 连接异常：{exc}", "error")
-            finally:
-                # Do not wait for every selected account (including slow
-                # retries) before reflecting this account's completed state.
-                await self._emit_accounts(force=True)
+                if action != "disconnect" and connection.context is not None:
+                    await connection.disconnect()
+                connection.last_error = str(exc)
+                message = f"账号 {label} 连接异常：{exc}"
+                errors.append(message)
+                logger.warning(message)
 
-        await asyncio.gather(*(run_one(label) for label in labels))
+        pending = iter(labels)
+
+        async def worker() -> None:
+            for label in pending:
+                await verification_ready.wait()
+                if pause_reason:
+                    return
+                await run_one(label)
+
+        async def report_progress() -> None:
+            previous = None
+            while True:
+                await asyncio.sleep(5)
+                progress = (completed, len(errors), skipped)
+                if progress != previous:
+                    previous = progress
+                    await self._log(
+                        f"登录进度：就绪 {completed}，失败 {len(errors)}，"
+                        f"未完成 {len(labels) - completed - len(errors) - skipped}",
+                        "connection",
+                    )
+
+        if action == "disconnect":
+            workers = [asyncio.create_task(run_one(label)) for label in labels]
+        else:
+            workers = [asyncio.create_task(worker())
+                       for _ in range(min(LOGIN_CONCURRENCY, len(labels)))]
+        progress_task = asyncio.create_task(report_progress()) if action != "disconnect" else None
+        try:
+            # The one-second monitor publishes progress while the batch runs.
+            results = await asyncio.gather(*workers, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    raise result
+        finally:
+            for task in workers:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+            if progress_task is not None:
+                progress_task.cancel()
+                await asyncio.gather(progress_task, return_exceptions=True)
+            await self._emit_accounts()
+        name = {"connect": "连接", "reconnect": "重连", "disconnect": "断开"}[action]
+        if pause_reason:
+            await self._log(
+                f"登录队列已暂停：{pause_reason}。本轮就绪 {completed}，失败 {len(errors)}，"
+                f"未完成 {len(labels) - completed - len(errors) - skipped}；已就绪连接保留。",
+                "error",
+            )
+        else:
+            await self._log(
+                f"{name}完成：成功 {completed}，失败 {len(errors)}，跳过 {skipped}",
+                "error" if errors else "connection",
+            )
+        for message in errors[:5]:
+            await self._log(message, "error")
+        if len(errors) > 5:
+            await self._log("其余失败详情请查看运行日志。", "error")
 
     async def _run_send(self, labels: list[str]) -> None:
         targets = self._targets(labels)
+        started = asyncio.get_running_loop().time()
         batches = await dispatch_to_accounts(targets, self.messages)
-        for label, results in batches.items():
-            for result in results:
-                action = "执行序列指令" if result.ext_id == -1 else "发送消息"
-                if result.success:
-                    await self._log(
-                        f"{action}至账号 {label}：{result.cmd}", "send"
-                    )
-                else:
-                    await self._log(
-                        f"{action}至账号 {label} 失败：{result.cmd}，{result.error}",
-                        "error",
-                    )
-        append_send_results(batches)
+        elapsed = asyncio.get_running_loop().time() - started
+        log_path = append_send_results(batches)
+        results = [result for batch in batches.values() for result in batch]
+        failures = [result for result in results if not result.success]
+        await self._log(
+            f"发送完成：账号 {len(batches)}，成功 {len(results) - len(failures)} 条，"
+            f"失败 {len(failures)} 条；发送耗时 {elapsed:.2f} 秒。详细记录：{log_path}",
+            "error" if failures else "send",
+        )
+        for result in failures[:5]:
+            await self._log(
+                f"账号 {result.account_label} 发送 {result.cmd} 失败：{result.error}",
+                "error",
+            )
+        if len(failures) > 5:
+            await self._log("其余发送失败详情请查看上述记录文件。", "error")
+
+    @contextmanager
+    def _task_logs_to_file(self, targets):
+        callbacks = [(context, context.log_callback) for _label, context in targets]
+        try:
+            for label, context in targets:
+                context.log_callback = (
+                    lambda message, account=label: logger.info("账号 %s：%s", account, message)
+                )
+            yield
+        finally:
+            for context, callback in callbacks:
+                context.log_callback = callback
 
     async def _run_script(
         self, labels: list[str], script: InteractionScript
     ) -> None:
+        targets = self._targets(labels)
+        started = asyncio.get_running_loop().time()
+        errors = []
+
         async def run_one(label: str) -> None:
             context = self._connection(label).context
             assert context is not None
@@ -379,11 +550,24 @@ class DesktopBridge:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                await self._log(
-                    f"账号 {label} 脚本 {script.name} 失败：{exc}", "error"
-                )
+                message = f"账号 {label} 脚本 {script.name} 失败：{exc}"
+                errors.append(message)
+                logger.warning(message)
+            else:
+                logger.info("账号 %s 脚本 %s 执行完成", label, script.name)
 
-        await asyncio.gather(*(run_one(label) for label in labels))
+        with self._task_logs_to_file(targets):
+            await asyncio.gather(*(run_one(label) for label, _context in targets))
+        elapsed = asyncio.get_running_loop().time() - started
+        await self._log(
+            f"专用任务完成：{script.name}；账号 {len(targets)}，成功 {len(targets) - len(errors)}，"
+            f"失败 {len(errors)}；执行耗时 {elapsed:.2f} 秒。详细记录：{get_runtime_log_path()}",
+            "error" if errors else "script",
+        )
+        for message in errors[:5]:
+            await self._log(message, "error")
+        if len(errors) > 5:
+            await self._log("其余脚本失败详情请查看上述记录文件。", "error")
 
     async def _run_combination(
         self,
@@ -392,34 +576,45 @@ class DesktopBridge:
         repetitions: int,
         interval: float,
     ) -> None:
-        results = await execute_combination_for_accounts(
-            self._targets(labels), steps, repetitions, interval
-        )
-        batches = {}
+        targets = self._targets(labels)
+        started = asyncio.get_running_loop().time()
+        with self._task_logs_to_file(targets):
+            results = await execute_combination_for_accounts(
+                targets, steps, repetitions, interval
+            )
+        elapsed = asyncio.get_running_loop().time() - started
+        batches = {
+            label: [item for item in result.send_results if item.ext_id >= 0]
+            for label, result in results.items()
+        }
+        log_path = append_send_results(batches) if any(batches.values()) else None
+        errors = []
         for label, result in results.items():
-            batches[label] = list(result.send_results)
-            for send_result in result.send_results:
-                action = "执行序列指令" if send_result.ext_id == -1 else "发送消息"
-                if send_result.success:
-                    await self._log(
-                        f"{action}至账号 {label}：{send_result.cmd}", "send"
-                    )
-                else:
-                    await self._log(
-                        f"{action}至账号 {label} 失败：{send_result.error}",
-                        "error",
-                    )
+            logger.info("账号 %s 组合任务完成轮数 %s/%s", label,
+                        result.completed_repetitions, result.requested_repetitions)
+            for step in result.step_results:
+                logger.info("账号 %s 第 %s 轮步骤 %s：%s；成功 %s；%s", label,
+                            step.repetition, step.step, step.description, step.success, step.error)
             if not result.success:
                 failure = next(
                     (step for step in result.step_results if not step.success), None
                 )
-                await self._log(
-                    f"账号 {label} 组合任务失败："
-                    f"{failure.error if failure else '未完整执行'}",
-                    "error",
-                )
-        if any(batches.values()):
-            append_send_results(batches)
+                message = f"账号 {label} 组合任务失败：{failure.error if failure else '未完整执行'}"
+                errors.append(message)
+                logger.warning(message)
+        send_results = [item for batch in batches.values() for item in batch]
+        send_failures = sum(not item.success for item in send_results)
+        records = f"发送明细：{log_path}。" if log_path is not None else ""
+        await self._log(
+            f"组合任务完成：账号 {len(results)}，成功 {len(results) - len(errors)}，失败 {len(errors)}；"
+            f"消息成功 {len(send_results) - send_failures} 条，失败 {send_failures} 条；"
+            f"执行耗时 {elapsed:.2f} 秒。{records}步骤与脚本详情：{get_runtime_log_path()}",
+            "error" if errors or send_failures else "send",
+        )
+        for message in errors[:5]:
+            await self._log(message, "error")
+        if len(errors) > 5:
+            await self._log("其余组合任务失败详情请查看上述记录文件。", "error")
 
     def _start_task(
         self, kind: str, labels: list[str], awaitable: Awaitable[Any]
@@ -448,8 +643,9 @@ class DesktopBridge:
         else:
             status, error = "completed", ""
         finally:
-            self.tasks.pop(kind, None)
-            self.task_labels.pop(kind, None)
+            if self.tasks.get(kind) is task:
+                self.tasks.pop(kind, None)
+                self.task_labels.pop(kind, None)
         await self._emit("task", kind=kind, status=status, error=error)
 
     @staticmethod
@@ -547,12 +743,13 @@ class DesktopBridge:
             await self._emit_accounts()
 
     async def _emit_accounts(self, force: bool = False) -> None:
+        accounts = self._accounts_payload()
         statuses = tuple(
-            (item["label"], item["status"]) for item in self._accounts_payload()
+            (item["label"], item["status"]) for item in accounts
         )
         if force or statuses != self._last_statuses:
             self._last_statuses = statuses
-            await self._emit("accounts", accounts=self._accounts_payload())
+            await self._emit("accounts", accounts=accounts)
 
     async def _emit_messages(self) -> None:
         await self._emit("messages", messages=self._messages_payload())

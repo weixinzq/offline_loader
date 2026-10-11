@@ -16,7 +16,6 @@ import aiohttp
 from src.accounts.browser_login import browser_login, is_captcha_page
 from src.config import PROJECT_ROOT, load_user_config, default_config
 
-
 @dataclass
 class ZoneData:
     zone_index: int
@@ -38,6 +37,13 @@ class LoginResult:
     session_id: str = ""
     zone_list: list[ZoneData] = field(default_factory=list)
     error_msg: str = ""
+    blocked_reason: str = ""
+
+
+class LoginBlockedError(ConnectionError):
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -114,6 +120,19 @@ def build_login_params(account: str, password: str, char_id: int) -> dict[str, s
     }
 
 
+def validate_game_login(result: LoginResult, account: str, role: Optional[RoleInfo] = None) -> None:
+    if not result.success:
+        if result.blocked_reason:
+            raise LoginBlockedError(result.blocked_reason, result.error_msg)
+        raise ValueError(result.error_msg)
+    if result.duoduo_id != account:
+        raise ValueError("游戏登录响应的账号与当前账号不匹配")
+    if not result.session_id or not result.user_id:
+        raise ValueError("游戏登录响应缺少 sid 或角色 ID")
+    if role is not None and result.user_id != role.user_id:
+        raise ValueError(f"角色校验失败：charId={role.char_id} 的 userId 不匹配")
+
+
 def parse_login_response(xml_text: str) -> LoginResult:
     try:
         root = ET.fromstring(xml_text)
@@ -127,7 +146,11 @@ def parse_login_response(xml_text: str) -> LoginResult:
                 "busy": "服务器繁忙",
                 "maintain": "系统维护中",
             }
-            return LoginResult(success=False, error_msg=error_msgs.get(result_code, f"Error:{result_code}"))
+            return LoginResult(
+                success=False,
+                error_msg=error_msgs.get(result_code, f"Error:{result_code}"),
+                blocked_reason="服务器返回 IP 登录限制" if result_code == "ip_limit" else "",
+            )
 
         duoduo_id = _get_element_text(root, "d") or _get_element_text(root, "ddid")
         player_id = _get_element_text(root, "u")
@@ -192,11 +215,11 @@ def _save_login_failure(stage, request_url, response, body, error, account, pass
             if value:
                 text = text.replace(value, "[REDACTED]")
         text = re.sub(
-            r"(<(?:sid|token|sessionId|password)\b[^>]*>).*?(</(?:sid|token|sessionId|password)\s*>)",
+            r"(<(?:sid|token|sessionId|password|loginkey)\b[^>]*>).*?(</(?:sid|token|sessionId|password|loginkey)\s*>)",
             r"\1[REDACTED]\2", text, flags=re.IGNORECASE | re.DOTALL,
         )
         return re.sub(
-            r'''(["']?\b(?:sid|token|session_?id|password|pwd|wyToken)["']?\s*[:=]\s*["']?)[^"'\s<>&;,}]+''',
+            r'''(["']?\b(?:sid|token|session_?id|password|pwd|wyToken|loginkey)["']?\s*[:=]\s*["']?)[^"'\s<>&;,}]+''',
             r"\1[REDACTED]", text, flags=re.IGNORECASE,
         )
 
@@ -261,9 +284,13 @@ async def http_login(
     login_url: Optional[str] = None,
     register_url: Optional[str] = None,
     browser_verification: bool = False,
+    timeout: Optional[float] = None,
 ) -> LoginResult:
     """Query the configured role and return the selected role's login result."""
     conf = load_user_config()
+    request_timeout = aiohttp.ClientTimeout(
+        total=float(timeout if timeout is not None else conf.get("timeout", 30))
+    )
     if login_url is None:
         login_url = conf.get("login_url", default_config()["login_url"])
     if register_url is None:
@@ -286,45 +313,22 @@ async def http_login(
     response_body = b""
     try:
         async with aiohttp.ClientSession() as session:
-            role_body = urllib.parse.urlencode(
-                {"type": "query_role_info", "duoduoId": account}
-            )
-            async with session.post(
-                register_url,
-                data=role_body,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=2),   #
-            ) as resp:
-                response = resp
-                response_body = await resp.read()
-                resp.raise_for_status()
-                role_text = response_body.decode("utf-8", errors="replace")
-            role = select_role(parse_role_response(role_text), char_id)
+            async def post(url, params, name):
+                nonlocal stage, request_url, response, response_body
+                stage, request_url, response, response_body = name, url, None, b""
+                async with session.post(url, data=urllib.parse.urlencode(params),
+                                        headers=headers, timeout=request_timeout) as resp:
+                    response = resp
+                    response_body = await resp.read()
+                    resp.raise_for_status()
+                    return response_body.decode("utf-8", errors="replace")
 
-            body = urllib.parse.urlencode(
-                build_login_params(account, password, char_id)
-            )
-            stage = "login"
-            request_url = login_url
-            response = None
-            response_body = b""
-            async with session.post(
-                login_url, data=body, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                response = resp
-                response_body = await resp.read()
-                resp.raise_for_status()
-                xml_text = response_body.decode("utf-8", errors="replace")
-            result = parse_login_response(xml_text)
-            if result.success and result.user_id != role.user_id:
-                result = LoginResult(
-                    success=False,
-                    error_msg=(
-                        f"角色校验失败：charId={char_id} 应为 userId="
-                        f"{role.user_id}，服务器返回 {result.user_id or '空'}"
-                    ),
-                )
+            role_text = await post(register_url, {"type": "query_role_info", "duoduoId": account}, "role_query")
+            role = select_role(parse_role_response(role_text), char_id)
+            result = parse_login_response(await post(login_url, build_login_params(account, password, char_id), "login"))
+            validate_game_login(result, account, role)
+    except LoginBlockedError as e:
+        result = LoginResult(success=False, error_msg=str(e), blocked_reason=e.reason)
     except ValueError as e:
         result = LoginResult(success=False, error_msg=str(e))
     except aiohttp.ClientError as e:
@@ -332,6 +336,11 @@ async def http_login(
     except asyncio.TimeoutError:
         result = LoginResult(success=False, error_msg="Login request timed out")
     if not result.success:
+        status = response.status if response is not None else None
+        if status in (403, 429):
+            result.blocked_reason = f"HTTP {status}：服务器拒绝继续登录"
+        elif is_captcha_page(response_body.decode("utf-8", errors="replace")):
+            result.blocked_reason = "登录需要人机验证"
         result.error_msg = _save_login_failure(
             stage, request_url, response, response_body, result.error_msg, account, password
         )

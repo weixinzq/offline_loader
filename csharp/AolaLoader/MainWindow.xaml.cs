@@ -90,7 +90,7 @@ public partial class MainWindow : Window
                         !state.GetProperty("connection_busy").GetBoolean()
                     );
                 });
-                await Task.Delay(350, cancellationToken);
+                await Task.Delay(1000, cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -112,13 +112,19 @@ public partial class MainWindow : Window
 
     private void UpdateAccounts(JsonElement values)
     {
-        HashSet<string> selected = AccountList.SelectedItems.Cast<AccountItem>().Select(x => x.Label).ToHashSet();
         var incoming = values.EnumerateArray()
             .Select(value => new AccountItem
             {
                 Label = value.GetProperty("label").GetString() ?? "",
                 Status = value.GetProperty("status").GetString() ?? "离线"
             }).ToList();
+        if (Accounts.Select(item => item.Label).SequenceEqual(incoming.Select(item => item.Label)))
+        {
+            for (int index = 0; index < incoming.Count; index++)
+                Accounts[index].Status = incoming[index].Status;
+            return;
+        }
+        HashSet<string> selected = AccountList.SelectedItems.Cast<AccountItem>().Select(x => x.Label).ToHashSet();
         Accounts.Clear();
         foreach (var account in incoming) Accounts.Add(account);
         foreach (var account in Accounts.Where(item => selected.Contains(item.Label)))
@@ -298,7 +304,7 @@ public partial class MainWindow : Window
         ConnectAllButton.IsEnabled = enabled;
         ReconnectSelectedButton.IsEnabled = enabled;
         DisconnectSelectedButton.IsEnabled = enabled;
-        DisconnectAllButton.IsEnabled = enabled;
+        DisconnectAllButton.IsEnabled = true;
     }
 
     private async void ConnectSelected_Click(object sender, RoutedEventArgs e) => await ConnectionActionAsync("connect", RequireSelected());

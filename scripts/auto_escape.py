@@ -10,7 +10,7 @@ from src.scripting.composer import MessageBatchStep, ScriptStep, execute_combina
 from src.scripting.loader import InteractionScript, ScriptExecutionError
 from src.messaging.parser import parse_send_message
 
-SCRIPT_NAME = "多排自动匹配战斗"
+SCRIPT_NAME = "多排自动逃跑"
 SCRIPT_DESCRIPTION = "前置消息步骤 → 等待新战斗就绪 → 后置消息步骤"
 WAIT_TIMEOUT_SECONDS = 60.0
 
@@ -43,7 +43,7 @@ before = MessageBatchStep((
 )
 
 after = MessageBatchStep((
-    SendMessage(id = 13, cmd = "1409", param={"useAiType":1}),
+    SendMessage(id = 13, cmd = "1404", param={"turn":0}),
     SendMessage(id=-1, cmd="#wait", param={}),
 )
 )

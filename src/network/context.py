@@ -284,6 +284,7 @@ class BattleLifecycle:
 
     def mark_end_requested(self) -> None:
         self.end_request_sent = True
+        self.last_error = ""
 
     def finish_without_confirmation(self) -> None:
         if self.phase in {"active", "ending"} and self.battle_id is not None and {
@@ -375,6 +376,12 @@ class BattleLifecycle:
                     self.entry_responses.add("2402")
             return
         if cmd == "2414":
+            if message.get("msg") and self.phase in {"entering", "active", "ending"}:
+                self.last_error = f"服务器拒绝逃跑：{message['msg']}"
+                self.end_request_sent = False
+                if self.phase == "ending":
+                    self.phase = "active"
+                return
             if self.end_request_sent and self.phase in {"entering", "active"}:
                 self.phase = "ending"
             return

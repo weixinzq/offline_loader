@@ -252,11 +252,13 @@ def test_mt250816_script_contract():
         router = MessageRouter(socket)
         socket.router = router
         user_logs = []
-        context = AppContext({}, None, None, socket, router, user_logs.append)
+        context = AppContext({}, SimpleNamespace(user_id="123"), None, socket, router, user_logs.append)
         if active:
             context.battle.begin_entry(-1)
             router.publish({"_cmd": 2303, "battleId": -10})
-            router.publish({"_cmd": 2401, "battleUniqueId": 1})
+            router.publish({"_cmd": 2401, "battleUniqueId": 1, "pmmList": [
+                {"battleView": {"pmmId": 123, "slotId": 0}},
+            ]})
             router.publish({"_cmd": 2402, "pt": 0})
         await run_mt250816(context)
         return socket.sent, user_logs
@@ -681,10 +683,11 @@ def test_explicit_zone_selection():
     assert account_session.select_zone(result, 3) is None
 
     async def fake_http_login(*args, **kwargs):
+        assert kwargs["timeout"] == 37
         return result
 
     async def run():
-        config = {"account": "test", "password": "test", "zone_index": 1}
+        config = {"account": "test", "password": "test", "zone_index": 1, "timeout": 37}
         _, selected = await account_session.authenticate(config)
         assert selected is tcp_only
         config["zone_index"] = 99
@@ -705,6 +708,8 @@ def test_explicit_zone_selection():
 
 
 def test_fixed_role_http_sequence():
+    from urllib.parse import urlencode
+
     requests = []
     responses = [
         "0,100000001,角色甲,1788413919000,0#6;7,14770|"
@@ -738,7 +743,7 @@ def test_fixed_role_http_sequence():
             return False
 
         def post(self, url, data, headers, timeout):
-            requests.append((url, data))
+            requests.append((url, data, timeout.total))
             return FakeResponse(responses[len(requests) - 1])
 
     original_session = account_login.aiohttp.ClientSession
@@ -751,6 +756,7 @@ def test_fixed_role_http_sequence():
                 char_id=0,
                 login_url="https://example.invalid/newLogin.jsp",
                 register_url="https://example.invalid/newRegister.jsp",
+                timeout=17,
             )
         )
     finally:
@@ -762,9 +768,134 @@ def test_fixed_role_http_sequence():
         "newLogin.jsp",
     ]
     assert requests[0][1] == "type=query_role_info&duoduoId=200000000"
-    assert "charId=0" in requests[1][1]
+    assert requests[1][1] == urlencode(account_login.build_login_params("200000000", "secret", 0))
+    assert result.session_id == "redacted"
+    assert [item[2] for item in requests] == [17] * 2
     print("=== Fixed Role HTTP Sequence ===")
-    print("  role query precedes one selected-role login request [OK]")
+    print("  original role query + password login; no added SSO requests [OK]")
+
+
+def test_password_login_flow():
+    from aiohttp import web
+    from unittest.mock import patch
+
+    async def run():
+        requests = []
+
+        async def game(request):
+            params = await request.post()
+            account = params.get("account") or params["duoduoId"]
+            assert request.headers["Origin"] == "https://aola.100bt.com"
+            if request.path == "/roles":
+                requests.append((account, "roles"))
+                response = web.Response(text=f"0,{account}-default,默认角色|2,{account}-selected,指定角色")
+                response.set_cookie("role_session", account, path="/")
+                return response
+            requests.append((account, "login"))
+            assert request.cookies.get("role_session") == account
+            assert dict(params) == account_login.build_login_params(account, "test-password", 2)
+            if account == "forbidden":
+                return web.Response(status=403, text="Forbidden")
+            if account == "captcha":
+                return web.Response(text='<html><script src="TCaptcha.js"></script>TencentCaptcha</html>')
+            if account == "wrong-password":
+                return web.Response(text="<r><c>invalid</c></r>")
+            player = "other-role" if account == "wrong-role" else f"{account}-selected"
+            sid = "" if account == "missing-sid" else f"{account}-sid"
+            identity = "other-account" if account == "mismatch" else account
+            return web.Response(text=f"<r><c>ok</c><sid>{sid}</sid><d>{identity}</d><u>{player}</u></r>")
+
+        app = web.Application()
+        app.router.add_post("/login", game)
+        app.router.add_post("/roles", game)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        base = f"http://localhost:{site._server.sockets[0].getsockname()[1]}"
+        try:
+            original_post = account_login.aiohttp.ClientSession.post
+
+            def local_post(session, url, *args, **kwargs):
+                assert url in (base + "/login", base + "/roles"), url
+                return original_post(session, url, *args, **kwargs)
+
+            with tempfile.TemporaryDirectory() as tmp, \
+                    patch.object(account_login, "PROJECT_ROOT", Path(tmp)), \
+                    patch.object(account_login.aiohttp.ClientSession, "post", local_post):
+                async def login(account):
+                    return await account_login.http_login(account, "test-password", char_id=2,
+                                                          login_url=base + "/login", register_url=base + "/roles")
+                results = await asyncio.gather(login("account-a"), login("account-b"))
+                for account, result in zip(("account-a", "account-b"), results):
+                    assert result.success and result.session_id == f"{account}-sid"
+                    assert [stage for name, stage in requests if name == account] == ["roles", "login"]
+                for account, expected, blocked in (
+                    ("forbidden", "403", True), ("captcha", "人机验证", True),
+                    ("wrong-password", "密码错误", False), ("mismatch", "不匹配", False),
+                    ("wrong-role", "角色校验失败", False),
+                    ("missing-sid", "缺少 sid", False),
+                ):
+                    result = await login(account)
+                    assert not result.success and expected in result.error_msg, result.error_msg
+                    assert bool(result.blocked_reason) == blocked
+                    assert [stage for name, stage in requests if name == account] == ["roles", "login"]
+                saved = "".join(p.read_text("utf-8") for p in Path(tmp).rglob("*.response.txt"))
+                assert "test-password" not in saved and account_login.md5_password("test-password") not in saved
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+    print("  real loopback password login + isolated account cookies + rejection/role/sid validation [OK]")
+
+
+def test_browser_password_sequence():
+    from unittest.mock import patch
+    import src.accounts.browser_login as browser_module
+    import playwright.async_api as playwright_api
+
+    calls = []
+    page = SimpleNamespace()
+
+    async def no_op(*args, **kwargs):
+        pass
+
+    page.goto = page.wait_for_load_state = no_op
+
+    async def new_page():
+        return page
+
+    async def new_context():
+        return SimpleNamespace(new_page=new_page)
+
+    async def launch(**kwargs):
+        assert kwargs["headless"] is False
+        return SimpleNamespace(new_context=new_context, close=no_op)
+
+    class FakePlaywright:
+        async def __aenter__(self):
+            return SimpleNamespace(chromium=SimpleNamespace(launch=launch))
+
+        async def __aexit__(self, *args):
+            return False
+
+    async def post(page, url, params, stage, *args):
+        calls.append((stage, params))
+        if stage == "browser_role_query":
+            text = "2,selected-role,角色"
+        else:
+            assert params == account_login.build_login_params("test-account", "test-password", 2)
+            text = "<r><c>ok</c><sid>final-sid</sid><d>test-account</d><u>selected-role</u></r>"
+        return text, None, text.encode("utf-8")
+
+    with patch.object(playwright_api, "async_playwright", FakePlaywright), \
+            patch.object(browser_module, "_post_form", post):
+        result = asyncio.run(browser_module.browser_login("test-account", "test-password", 2,
+                                                         "https://example.invalid/login", "https://example.invalid/roles"))
+    assert result.success and result.session_id == "final-sid"
+    assert [stage for stage, _ in calls] == ["browser_role_query", "browser_login"]
+    assert calls[-1][1]["charId"] == "2"
+    print("  isolated manual-browser path preserves original password login stages [OK]")
 
 
 def test_login_failure_diagnostics():
@@ -772,7 +903,7 @@ def test_login_failure_diagnostics():
 
     account, password = "200000000", "private-password"
     role = "0,100000001,角色甲"
-    success = "<r><c>ok</c><sid>private-sid</sid><u>100000001</u></r>"
+    success = "<r><c>ok</c><sid>private-sid</sid><d>200000000</d><u>100000001</u></r>"
     captcha = (
         '<html><script src="TCaptcha.js"></script><script>TencentCaptcha; /WafCaptcha</script>'
         f'{account} {password} {account_login.md5_password(password)}'
@@ -802,6 +933,7 @@ def test_login_failure_diagnostics():
 
     cases = [
         ([FakeResponse(role), FakeResponse(captcha)], "login", 200, "人机验证"),
+        ([FakeResponse(role), FakeResponse("<html>Forbidden</html>", 403)], "login", 403, "403"),
         ([FakeResponse("Too Many Requests", 429)], "role_query", 429, "限流"),
         ([FakeResponse(role), FakeResponse("<html>Unavailable</html>", 503)], "login", 503, "HTML"),
         ([FakeResponse(role), asyncio.TimeoutError()], "login", None, "timed out"),
@@ -834,6 +966,7 @@ def test_login_failure_diagnostics():
                 assert result.success and not files
                 continue
             assert not result.success and expected in result.error_msg
+            assert bool(result.blocked_reason) == (status in (403, 429) or expected == "人机验证")
             assert len(files) == 1 and str(files[0]) in result.error_msg
             metadata = json.loads(files[0].read_text("utf-8"))
             assert metadata["stage"] == stage and metadata["http_status"] == status
@@ -896,6 +1029,7 @@ def test_bridge_connection_status_is_incremental():
             self.delay = delay
             self.context = None
             self.last_error = ""
+            self.state = "离线"
 
         @property
         def online(self):
@@ -903,14 +1037,17 @@ def test_bridge_connection_status_is_incremental():
 
         async def connect(self):
             await asyncio.sleep(self.delay)
-            self.context = SimpleNamespace(log_callback=None)
+            self.context = SimpleNamespace(
+                log_callback=None, wait_for_player_initialization=lambda: asyncio.sleep(0)
+            )
+            self.state = "在线"
             return True
 
         async def disconnect(self):
             self.context = None
 
     first = FakeConnection("A", 0)
-    second = FakeConnection("B", 0.05)
+    second = FakeConnection("B", 1.1)
     bridge = object.__new__(ipc_server.DesktopBridge)
     bridge.manager = SimpleNamespace(connections=[first, second])
     snapshots = []
@@ -923,11 +1060,599 @@ def test_bridge_connection_status_is_incremental():
 
     bridge._emit_accounts = emit_accounts
     bridge._log = discard_log
-    asyncio.run(bridge._run_connection_action("connect", ["A", "B"]))
+    first.refresh_state = second.refresh_state = lambda: None
+
+    async def run():
+        monitor = asyncio.create_task(bridge._monitor_accounts())
+        try:
+            await bridge._run_connection_action("connect", ["A", "B"])
+        finally:
+            monitor.cancel()
+            await asyncio.gather(monitor, return_exceptions=True)
+
+    asyncio.run(run())
     assert snapshots[0] == (True, False), snapshots
     assert snapshots[-1] == (True, True), snapshots
+    assert len(snapshots) == 2, snapshots
     print("=== C# Bridge Connection Status ===")
-    print("  each account publishes immediately without waiting for the batch [OK]")
+    print("  monitor publishes progress and the batch publishes final state [OK]")
+
+
+def test_bridge_bulk_send_does_not_flood_events():
+    from unittest.mock import patch
+    from src.messaging.dispatcher import SendResult
+
+    async def run(failure_count):
+        labels = [f"account-{index}" for index in range(20)]
+        batches = {
+            label: [
+                SendResult(label, sequence + 1, 42, f"command-{sequence}",
+                           "2026-10-08T13:55:46+08:00", True)
+                for sequence in range(31)
+            ]
+            for label in labels
+        }
+        for index in range(failure_count):
+            label = labels[index]
+            batches[label][0] = SendResult(
+                label, 1, 42, "command-0", "2026-10-08T13:55:46+08:00",
+                False, "模拟发送失败",
+            )
+        bridge = object.__new__(ipc_server.DesktopBridge)
+        bridge.messages = ()
+        bridge._targets = lambda selected: [(label, None) for label in selected]
+        events = []
+
+        async def dispatch(targets, messages):
+            assert [label for label, _ in targets] == labels
+            return batches
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "send.log"
+
+            async def emit(event, **payload):
+                # The full audit must already exist before UI reporting starts.
+                records = [json.loads(line) for line in log_path.read_text("utf-8").splitlines()]
+                assert len(records) == 620
+                assert sum(not row["success"] for row in records) == failure_count
+                events.append((event, payload))
+
+            bridge._emit = emit
+            with patch.object(ipc_server, "dispatch_to_accounts", dispatch), \
+                    patch.object(ipc_server, "append_send_results", lambda data: append_send_results(data, log_path)):
+                await bridge._run_send(labels)
+            assert len(events) == 1 + min(failure_count, 5) + int(failure_count > 5)
+            summary = events[0][1]["message"]
+            assert "账号 20" in summary and f"成功 {620 - failure_count} 条" in summary
+            assert f"失败 {failure_count} 条" in summary and str(log_path) in summary
+            assert "发送耗时" in summary
+
+    asyncio.run(run(0))
+    asyncio.run(run(8))
+    print("=== Bulk Send Reporting ===")
+    print("  620 audit rows retained before UI; one success summary; at most five error samples [OK]")
+
+
+def test_bridge_script_and_combination_reporting():
+    from unittest.mock import patch
+    from src.messaging.dispatcher import SendResult
+    from src.scripting.composer import CombinationResult, CombinationStepResult
+
+    async def run(kind, failure_count=0, cancel=False):
+        labels = [f"account-{index}" for index in range(20)]
+        old_logs = []
+        original_callback = old_logs.append
+        contexts = [SimpleNamespace(log_callback=original_callback) for _ in labels]
+        connections = dict(zip(labels, (SimpleNamespace(context=item) for item in contexts)))
+        bridge = object.__new__(ipc_server.DesktopBridge)
+        bridge._connection = connections.__getitem__
+        bridge._targets = lambda selected: [(label, connections[label].context) for label in selected]
+        events = []
+        entered = set()
+        all_entered = asyncio.Event()
+        finished = False
+
+        async def script_run(context):
+            index = context.index
+            entered.add(index)
+            if len(entered) == len(labels):
+                all_entered.set()
+            await all_entered.wait()
+            for sequence in range(100):
+                context.log_callback(f"script-detail-{sequence}")
+            if cancel:
+                await asyncio.Event().wait()
+            if index < failure_count:
+                raise ValueError(f"script-failure-{index}")
+
+        for index, context in enumerate(contexts):
+            context.index = index
+        script = InteractionScript("scripts.reporting_test", "测试脚本", "", script_run)
+        steps = (ScriptStep(script),)
+        results = {}
+
+        async def combination(targets, actual_steps, repetitions, interval):
+            nonlocal finished
+            assert targets == bridge._targets(labels)
+            assert actual_steps == steps and repetitions == 100 and interval == 0.5
+            for index, (label, context) in enumerate(targets):
+                for sequence in range(100):
+                    context.log_callback(f"combination-detail-{sequence}")
+                failed = index < failure_count
+                sends = tuple(
+                    SendResult(label, sequence + 1, 42, f"command-{sequence}",
+                               "2026-10-08T19:54:00+08:00", not (failed and sequence == 0),
+                               f"send-failure-{index}" if failed and sequence == 0 else "")
+                    for sequence in range(300)
+                )
+                sends += tuple(
+                    SendResult(label, 301 + sequence, -1, "#wait",
+                               "2026-10-08T19:54:00+08:00", not (failed and sequence == 0),
+                               "wait failed" if failed and sequence == 0 else "")
+                    for sequence in range(100)
+                )
+                results[label] = CombinationResult(
+                    100, 99 if failed else 100,
+                    (CombinationStepResult(100, 1, "script", "测试脚本", not failed,
+                                           f"combination-failure-{index}" if failed else ""),),
+                    sends,
+                )
+            all_entered.set()
+            if cancel:
+                await asyncio.Event().wait()
+            finished = True
+            return results
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime_path = Path(directory) / "runtime.log"
+            send_path = Path(directory) / "send.log"
+            handler = logging.FileHandler(runtime_path, encoding="utf-8")
+            previous_level = ipc_server.logger.level
+            ipc_server.logger.setLevel(logging.INFO)
+            ipc_server.logger.addHandler(handler)
+
+            async def emit(event, **payload):
+                assert all(item.log_callback is original_callback for item in contexts)
+                assert not old_logs
+                if kind == "combination":
+                    assert finished
+                    records = [json.loads(line) for line in send_path.read_text("utf-8").splitlines()]
+                    assert len(records) == 6000
+                    assert sum(not item["success"] for item in records) == failure_count
+                    assert {item["account_label"] for item in records} == set(labels)
+                else:
+                    assert len(entered) == 20
+                events.append((event, payload))
+
+            bridge._emit = emit
+            try:
+                with patch.object(ipc_server, "get_runtime_log_path", lambda: runtime_path), \
+                        patch.object(ipc_server, "execute_combination_for_accounts", combination), \
+                        patch.object(ipc_server, "append_send_results", lambda data: append_send_results(data, send_path)):
+                    coroutine = (bridge._run_script(labels, script) if kind == "script" else
+                                 bridge._run_combination(labels, steps, 100, 0.5))
+                    task = asyncio.create_task(coroutine)
+                    if cancel:
+                        await all_entered.wait()
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                        else:
+                            raise AssertionError("task cancellation was swallowed")
+                        assert not events
+                    else:
+                        await task
+                        assert len(events) == 1 + min(failure_count, 5) + int(failure_count > 5)
+                        summary = events[0][1]["message"]
+                        assert "账号 20" in summary and f"成功 {20 - failure_count}" in summary
+                        assert f"失败 {failure_count}" in summary and "执行耗时" in summary
+                        assert str(runtime_path) in summary
+                        if kind == "combination":
+                            assert f"消息成功 {6000 - failure_count} 条，失败 {failure_count} 条" in summary
+                            assert str(send_path) in summary
+                        handler.flush()
+                        text = runtime_path.read_text("utf-8")
+                        assert text.count(f"{kind}-detail-") == 2000
+                        for index in range(failure_count):
+                            assert f"{kind}-failure-{index}" in text
+                    assert all(item.log_callback is original_callback for item in contexts)
+                    for context in contexts:
+                        context.log_callback("restored")
+                    assert old_logs == ["restored"] * 20
+            finally:
+                ipc_server.logger.removeHandler(handler)
+                ipc_server.logger.setLevel(previous_level)
+                handler.close()
+
+    for kind in ("script", "combination"):
+        asyncio.run(run(kind))
+        asyncio.run(run(kind, failure_count=8))
+        asyncio.run(run(kind, cancel=True))
+    print("=== Script and Combination Reporting ===")
+    print("  concurrent scripts; 6000 audit rows; bounded summaries; detail logs and callbacks survive failures/cancellation [OK]")
+
+
+def test_bridge_bulk_disconnect_does_not_flood_events():
+    async def run():
+        bridge = object.__new__(ipc_server.DesktopBridge)
+        bridge.manager = AccountManager.from_specs(
+            [AccountSpec(f"offline-{index}", {}) for index in range(2008)]
+        )
+        bridge._last_statuses = tuple(
+            (item.spec.label, "离线") for item in bridge.manager.connections
+        )
+        events = []
+
+        async def emit(event, **payload):
+            events.append((event, payload))
+
+        bridge._emit = emit
+        labels = [item.spec.label for item in bridge.manager.connections]
+        await bridge._run_connection_action("disconnect", labels)
+        assert len(events) == 1, len(events)
+        assert events[0][0] == "log"
+        assert "跳过 2008" in events[0][1]["message"]
+
+        closed = []
+
+        async def close():
+            closed.append(True)
+
+        # An offline context still owns resources and must be closed.
+        bridge.manager.connections[0].context = SimpleNamespace(close=close)
+        events.clear()
+        await bridge._run_connection_action("disconnect", labels)
+        assert closed == [True]
+        assert len(events) == 1
+        assert "成功 1，失败 0，跳过 2007" in events[0][1]["message"]
+
+    asyncio.run(run())
+    print("=== Bulk Disconnect Events ===")
+    print("  2008 offline accounts emit one summary; stale context is closed [OK]")
+
+
+def test_bridge_bulk_failures_keep_details_without_ui_flood():
+    from unittest.mock import patch
+
+    class FailedConnection:
+        def __init__(self, index):
+            self.spec = AccountSpec(f"failed-{index}", {})
+            self.context = None
+            self.online = False
+
+        async def connect(self):
+            raise ConnectionError("mock failure")
+
+    async def run():
+        bridge = object.__new__(ipc_server.DesktopBridge)
+        bridge.manager = SimpleNamespace(connections=[FailedConnection(i) for i in range(20)])
+        bridge._last_statuses = tuple((item.spec.label, "离线") for item in bridge.manager.connections)
+        events = []
+
+        async def emit(event, **payload):
+            events.append((event, payload))
+
+        bridge._emit = emit
+        with patch.object(ipc_server.logger, "warning") as warning, \
+                patch.object(ipc_server, "LOGIN_START_INTERVAL", 0):
+            await bridge._run_connection_action("connect", [item.spec.label for item in bridge.manager.connections])
+            assert warning.call_count == 20
+        assert len(events) == 7, events
+        assert "失败 20" in events[0][1]["message"]
+
+    asyncio.run(run())
+    print("=== Bulk Failure Details ===")
+    print("  all failures reach runtime logging; UI receives a bounded summary [OK]")
+
+
+def test_bridge_login_queue_covers_initialization_and_cancellation():
+    from unittest.mock import patch
+
+    async def run(cancel=False):
+        active = peak = closed = 0
+        starts = []
+        gate = asyncio.Event()
+        five_started = asyncio.Event()
+
+        class FakeContext:
+            def __init__(self, index):
+                self.index = index
+                self.log_callback = None
+                self.released = False
+
+            async def wait_for_player_initialization(self):
+                nonlocal active
+                if cancel:
+                    await gate.wait()
+                else:
+                    await asyncio.sleep(0.1)
+                    if self.index == 7:
+                        raise ConnectionError("mock initialization failure")
+                self.released = True
+                active -= 1
+
+            async def close(self):
+                nonlocal active, closed
+                await asyncio.sleep(0.01)
+                if not self.released:
+                    active -= 1
+                    self.released = True
+                closed += 1
+
+        class FakeConnection:
+            def __init__(self, index):
+                self.index = index
+                self.spec = AccountSpec(f"queued-{index}", {})
+                self.context = None
+                self.last_error = ""
+                self.state = "离线"
+
+            @property
+            def online(self):
+                return self.context is not None
+
+            async def connect(self):
+                nonlocal active, peak
+                starts.append(asyncio.get_running_loop().time())
+                active += 1
+                peak = max(peak, active)
+                if active == 5:
+                    five_started.set()
+                self.context = FakeContext(self.index)
+                return True
+
+            async def disconnect(self):
+                context, self.context = self.context, None
+                if context is not None:
+                    await context.close()
+
+        bridge = object.__new__(ipc_server.DesktopBridge)
+        bridge.manager = SimpleNamespace(connections=[FakeConnection(i) for i in range(50)])
+        bridge.tasks, bridge.task_labels = {}, {}
+        bridge._last_statuses = ()
+        bridge._connection_action = ""
+        events = []
+
+        async def emit(event, **payload):
+            events.append((event, payload))
+
+        bridge._emit = emit
+        labels = [item.spec.label for item in bridge.manager.connections]
+        with patch.object(ipc_server, "LOGIN_START_INTERVAL", 0.01), \
+                patch.object(ipc_server.logger, "warning"):
+            if cancel:
+                await bridge._dispatch("connect", {"labels": labels})
+                old = bridge.tasks["connection"]
+                await asyncio.wait_for(five_started.wait(), 2)
+                await bridge._dispatch("disconnect", {"labels": labels})
+                new = bridge.tasks["connection"]
+                assert new is not old and old.cancelled()
+                await new
+                await asyncio.sleep(0)
+                assert len(starts) == 5 and closed == 5
+                assert all(item.context is None for item in bridge.manager.connections)
+            else:
+                await bridge._run_connection_action("connect", labels)
+                assert len(starts) == 50 and closed == 1
+                assert sum(item.online for item in bridge.manager.connections) == 49
+                assert all(b - a >= 0.008 for a, b in zip(starts, starts[1:]))
+            assert active == 0 and peak == 5, (active, peak)
+
+    asyncio.run(run())
+    asyncio.run(run(cancel=True))
+    print("=== Bounded Desktop Login Queue ===")
+    print("  five slots cover initialization/cleanup; starts are paced; disconnect cancels queued logins [OK]")
+
+
+def test_login_refusal_pauses_queue_and_preserves_ready_connections():
+    from unittest.mock import patch
+
+    async def run():
+        starts, closed, events = [], [], []
+        gate = asyncio.Event()
+
+        class Context:
+            def __init__(self, index):
+                self.index = index
+                self.log_callback = None
+                self.socket = SimpleNamespace(connected=True)
+                self.messages = SimpleNamespace(disconnected=asyncio.Event())
+
+            async def wait_for_player_initialization(self):
+                if self.index != 1:
+                    await gate.wait()
+
+            async def close(self):
+                closed.append(self.index)
+                self.socket.connected = False
+                self.messages.disconnected.set()
+
+        async def opener(config):
+            index = config["index"]
+            starts.append(index)
+            if index == 3:
+                raise account_login.LoginBlockedError("HTTP 403：服务器拒绝继续登录", "mock refused login")
+            return Context(index)
+
+        connections = [AccountConnection(AccountSpec(f"pause-{i}", {"index": i})) for i in range(20)]
+        for connection in connections:
+            original = connection.connect
+            connection.connect = lambda original=original: original(opener=opener)
+        connections[0].context = Context(0)
+        bridge = object.__new__(ipc_server.DesktopBridge)
+        bridge.manager = AccountManager(connections)
+        bridge._last_statuses = ()
+
+        async def emit(event, **payload):
+            events.append((event, payload))
+
+        bridge._emit = emit
+        with patch.object(ipc_server, "LOGIN_START_INTERVAL", 0.01), \
+                patch.object(ipc_server.logger, "warning"):
+            await asyncio.wait_for(bridge._run_connection_action(
+                "connect", [item.spec.label for item in connections]), 2)
+        assert connections[0].online and connections[1].online
+        assert all(item.context is None for item in connections[2:])
+        assert connections[3].attempts == 1 and not connections[3].retryable
+        assert len(starts) <= 5 and 19 not in starts
+        assert 0 not in closed and 1 not in closed
+        assert any("登录队列已暂停" in value.get("message", "") for _, value in events)
+
+    asyncio.run(run())
+    print("=== Login Refusal Pause ===")
+    print("  refusal is not retried; queued work stops; ready sessions survive [OK]")
+
+
+def test_manual_verification_queue():
+    from unittest.mock import patch
+    from src.accounts.browser_login import BrowserLoginStopped
+
+    async def run(mode):
+        starts, events, manual_calls, closed = [], [], [], []
+        challenge = asyncio.Event()
+        manual_started = asyncio.Event()
+        human_completed = asyncio.Event()
+        active = peak = 0
+
+        class Context:
+            def __init__(self, index):
+                self.index = index
+                self.socket = SimpleNamespace(connected=True)
+                self.messages = SimpleNamespace(disconnected=asyncio.Event())
+
+            async def wait_for_player_initialization(self):
+                pass
+
+            async def close(self):
+                closed.append(self.index)
+                self.socket.connected = False
+                self.messages.disconnected.set()
+
+        async def normal(config):
+            index = config["index"]
+            starts.append(index)
+            if index in (1, 2):
+                if index == 2:
+                    challenge.set()
+                await challenge.wait()
+                raise account_login.LoginBlockedError("登录需要人机验证", "mock official challenge")
+            return Context(index)
+
+        async def interactive(config, *, interactive):
+            nonlocal active, peak
+            assert interactive is True
+            manual_calls.append(config["index"])
+            active += 1
+            peak = max(peak, active)
+            manual_started.set()
+            try:
+                await human_completed.wait()
+                if mode == "closed":
+                    raise BrowserLoginStopped("验证窗口已关闭")
+                return Context(config["index"])
+            finally:
+                active -= 1
+
+        connections = [AccountConnection(AccountSpec(f"manual-{i}", {"index": i})) for i in range(12)]
+        for connection in connections:
+            original = connection.connect
+            connection.connect = lambda original=original, **kwargs: original(**kwargs) if kwargs else original(opener=normal)
+        connections[0].context = Context(0)
+        bridge = object.__new__(ipc_server.DesktopBridge)
+        bridge.manager = AccountManager(connections)
+        bridge._last_statuses = ()
+
+        async def emit(event, **payload):
+            events.append((event, payload))
+
+        bridge._emit = emit
+        with patch.object(ipc_server, "LOGIN_START_INTERVAL", 0.001), \
+                patch.object(ipc_server, "open_context", interactive), \
+                patch.object(ipc_server.logger, "warning"):
+            task = asyncio.create_task(bridge._run_connection_action("connect", [c.spec.label for c in connections]))
+            try:
+                await asyncio.wait_for(manual_started.wait(), 2)
+                frozen = len(starts)
+                await asyncio.sleep(0.04)
+                assert len(starts) == frozen and len(manual_calls) == 1 and not task.done()
+                assert connections[0].online
+                if mode == "cancel":
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                else:
+                    human_completed.set()
+                    await asyncio.wait_for(task, 2)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        assert active == 0 and peak == 1
+        assert connections[0].online and 0 not in closed
+        if mode == "resume":
+            assert len(manual_calls) == 2 and all(c.online for c in connections)
+            assert any("人工验证后的连接已建立" in v.get("message", "") for _, v in events)
+        else:
+            assert len(manual_calls) == 1 and all(c.context is None for c in connections[1:])
+            if mode == "closed":
+                assert any("登录队列已暂停：人工验证或后续登录未完成" in v.get("message", "") for _, v in events)
+
+    for mode in ("resume", "closed", "cancel"):
+        asyncio.run(run(mode))
+    print("  manual challenges are serialized; new accounts wait; success resumes; close/cancel drains [OK]")
+
+
+def test_login_progress_reports_failures_before_batch_finishes():
+    from unittest.mock import patch
+
+    async def run():
+        reported = asyncio.Event()
+        gate = asyncio.Event()
+
+        class Connection:
+            def __init__(self, index):
+                self.spec = AccountSpec(f"progress-{index}", {})
+                self.context = None
+                self.last_error = "mock failure"
+
+            @property
+            def online(self):
+                return self.context is not None
+
+            async def connect(self):
+                if self.spec.label != "progress-3":
+                    return False
+                self.context = SimpleNamespace(
+                    log_callback=None, wait_for_player_initialization=gate.wait)
+                return True
+
+            async def disconnect(self):
+                self.context = None
+
+        bridge = object.__new__(ipc_server.DesktopBridge)
+        bridge.manager = SimpleNamespace(connections=[Connection(i) for i in range(4)])
+        bridge._last_statuses = ()
+
+        async def emit(event, **payload):
+            if event == "log" and "登录进度" in payload["message"]:
+                assert "失败 3" in payload["message"] and "未完成 1" in payload["message"]
+                reported.set()
+
+        bridge._emit = emit
+        with patch.object(ipc_server, "LOGIN_START_INTERVAL", 0), \
+                patch.object(ipc_server.logger, "warning"):
+            task = asyncio.create_task(bridge._run_connection_action(
+                "connect", [item.spec.label for item in bridge.manager.connections]))
+            try:
+                await asyncio.wait_for(reported.wait(), 6)
+                assert not task.done()
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+    print("=== Live Login Progress ===")
+    print("  failed/unfinished counts are visible while another account is waiting [OK]")
 
 
 def test_account_connection_failure_isolation():
@@ -974,6 +1699,94 @@ def test_account_connection_failure_isolation():
     assert online == [True, False]
     print("=== Account Connection Manager ===")
     print("  retry policy + single-account failure isolation [OK]")
+
+
+def test_tcp_handshake_eof_and_connection_cleanup():
+    from unittest.mock import AsyncMock, patch
+    import src.network.socket_client as socket_module
+
+    class Writer:
+        def __init__(self):
+            self.closes = 0
+
+        def close(self):
+            self.closes += 1
+
+        async def wait_closed(self):
+            pass
+
+    async def run(policy, *, domain="example.invalid", login_error=False):
+        reader = asyncio.StreamReader()
+        reader.feed_data(policy)
+        reader.feed_eof()
+        writer = Writer()
+        socket = GameSocket("test-session")
+        fallback_calls = []
+
+        async def connect_ws(*args):
+            assert writer.closes == 1 and socket._reader is None
+            assert socket._writer is None and not socket.connected
+            fallback_calls.append(True)
+            socket._connected = True
+            return True
+
+        socket.connect_ws = connect_ws
+        socket.login = AsyncMock(side_effect=ValueError("模拟登录失败")) if login_error else AsyncMock(return_value={"_cmd": "logOK"})
+        zone = SimpleNamespace(host="example.invalid", flash_port=8000, port=8100,
+                               domain=domain, zone_index=1025, zone_name="test")
+        with patch.object(socket_module.asyncio, "open_connection", AsyncMock(return_value=(reader, writer))), \
+                patch.object(socket_module, "GameSocket", return_value=socket):
+            if login_error:
+                try:
+                    await socket_module.login_and_connect(zone, "test-player", "test-session")
+                except ValueError:
+                    assert writer.closes == 1 and not socket.connected
+                    assert not fallback_calls
+                else:
+                    raise AssertionError("Login exception was swallowed")
+                return
+            result = await socket_module.login_and_connect(zone, "test-player", "test-session")
+        if policy.endswith(b"\0"):
+            assert result is socket and socket.connected
+            assert writer.closes == 0 and not fallback_calls
+        elif domain:
+            assert result is socket and socket.connected and len(fallback_calls) == 1
+            assert writer.closes == 1
+        else:
+            assert result is None and not socket.connected and writer.closes == 1
+            assert "安全策略" in socket.disconnect_reason and not fallback_calls
+        await socket.close()
+        assert writer.closes == 1
+
+    async def cancel():
+        reader = asyncio.StreamReader()
+        writer = Writer()
+        socket = GameSocket("test-session")
+        reading = asyncio.Event()
+        original_read = reader.readexactly
+
+        async def read(count):
+            reading.set()
+            return await original_read(count)
+
+        reader.readexactly = read
+        with patch.object(socket_module.asyncio, "open_connection", AsyncMock(return_value=(reader, writer))):
+            task = asyncio.create_task(socket.connect_tcp("example.invalid", 8000))
+            await reading.wait()
+            task.cancel()
+            outcome = await asyncio.gather(task, return_exceptions=True)
+        assert isinstance(outcome[0], asyncio.CancelledError)
+        assert writer.closes == 1 and not socket.connected
+        assert socket._reader is None and socket._writer is None
+
+    asyncio.run(run(b""))
+    asyncio.run(run(b"<partial-policy"))
+    asyncio.run(run(b"", domain=""))
+    asyncio.run(run(b"<policy/>\0"))
+    asyncio.run(run(b"<policy/>\0", login_error=True))
+    asyncio.run(cancel())
+    print("=== TCP Handshake Cleanup ===")
+    print("  early/partial EOF cleanup before WSS; normal TCP retained; login error/cancellation cleanup [OK]")
 
 
 def test_receive_error_does_not_fake_disconnect():
@@ -1480,7 +2293,9 @@ def test_battle_entry_then_ordered_sends():
             if self.finish_entry:
                 async def complete_entry():
                     await asyncio.sleep(0.08)
-                    self.publish({"_cmd": 2401})
+                    self.publish({"_cmd": 2401, "pmmList": [
+                        {"battleView": {"pmmId": 123, "slotId": 0}},
+                    ]})
                     self.publish({"_cmd": 2426})
                     self.publish({"_cmd": 2402, "pt": 0})
                     self.ready_at = asyncio.get_running_loop().time()
@@ -1495,7 +2310,7 @@ def test_battle_entry_then_ordered_sends():
         async def initialized():
             return None
 
-        return SimpleNamespace(
+        context = SimpleNamespace(
             socket=socket,
             messages=router,
             user_id="123",
@@ -1504,6 +2319,9 @@ def test_battle_entry_then_ordered_sends():
             assert_automation_allowed=lambda: None,
             log=lambda _message: None,
         )
+        context.auto_battle = AutoBattle(context)
+        router.add_observer(context.auto_battle.observe)
+        return context
 
     messages = [
         SendMessage(15, "54_22", {"handler": "MT250816_t2f"}),
@@ -1590,7 +2408,9 @@ def test_externally_started_battle_actions():
 
         def enter_battle(self):
             self.publish({"_cmd": 2303, "battleId": -94617668})
-            self.publish({"_cmd": 2401, "battleUniqueId": 123})
+            self.publish({"_cmd": 2401, "battleUniqueId": 123, "pmmList": [
+                {"battleView": {"pmmId": 241627493, "slotId": 0}},
+            ]})
             self.publish({"_cmd": 2426})
             self.publish({"_cmd": 2402, "pt": 0})
             self.ready_at = asyncio.get_running_loop().time()
@@ -1976,7 +2796,9 @@ def test_battle_end_request_without_final_response():
             if cmd == "54_22":
                 self.entries += 1
                 self.publish({"_cmd": 2303, "battleId": -241627493})
-                self.publish({"_cmd": 2401, "battleUniqueId": self.entries})
+                self.publish({"_cmd": 2401, "battleUniqueId": self.entries, "pmmList": [
+                    {"battleView": {"pmmId": 123, "slotId": 0}},
+                ]})
                 self.publish({"_cmd": 2426})
                 self.publish({"_cmd": 2402, "pt": 0})
             elif cmd == "1404":
@@ -1991,7 +2813,7 @@ def test_battle_end_request_without_final_response():
         async def initialized():
             return None
 
-        return SimpleNamespace(
+        context = SimpleNamespace(
             socket=socket,
             messages=router,
             user_id="123",
@@ -2000,6 +2822,9 @@ def test_battle_end_request_without_final_response():
             assert_automation_allowed=lambda: None,
             log=lambda _message: None,
         )
+        context.auto_battle = AutoBattle(context)
+        router.add_observer(context.auto_battle.observe)
+        return context
 
     entry = [SendMessage(15, "54_22", {"handler": "MT250816_t2f"})]
 
@@ -2618,6 +3443,147 @@ def test_battle_sequence_script():
     print("  message steps + new entry gate + no escape + failures/cancel cleanup [OK]")
 
 
+def test_battle_escape_slot_and_confirmation():
+    class FakeSocket:
+        connected = True
+
+        def __init__(self, user_id, slot, reject):
+            self.user_id = user_id
+            self.slot = slot
+            self.reject = reject
+            self.sent = []
+            self.matches = 0
+            self.router = None
+            self.active_room_id = -1
+
+        async def send_xt_message(self, ext_id, cmd, params):
+            self.sent.append((cmd, dict(params)))
+            if cmd == "trigger":
+                self.matches += 1
+                for message in (
+                    {"_cmd": 2303, "battleId": self.user_id},
+                    {"_cmd": 2401, "battleUniqueId": self.matches,
+                     "pmmList": [
+                         {"PSId": 0, "battleView": {"pmmId": self.user_id + 100,
+                                                   "slotId": 11 - self.slot}},
+                         {"PSId": 0, "battleView": {"pmmId": self.user_id,
+                                                   "slotId": self.slot}},
+                     ]},
+                    {"_cmd": 2426}, {"_cmd": 2402, "pt": 0},
+                ):
+                    self.router.publish(message)
+            elif cmd == "1404":
+                assert params["reqPSId"] == self.slot
+                if self.reject:
+                    self.router.publish({"_cmd": 2414, "msg": "你不是对应战场位置的所有者！"})
+                else:
+                    self.router.publish({"_cmd": 2414, "isEscape": True,
+                                         "reqId": self.user_id, "reqSId": self.slot})
+
+    async def fast_combination(*args, **kwargs):
+        return await execute_combination(*args, **kwargs, message_delay=0)
+
+    async def exercise():
+        contexts, sockets, waiting, tasks = [], [], [], []
+        script = InteractionScript("scripts.auto_battle", "escape", "", battle_sequence_script.run)
+        for index in range(8):
+            socket = FakeSocket(1000 + index, 0 if index % 2 == 0 else 11, index in {4, 6})
+            router = MessageRouter(socket)
+            socket.router = router
+            event = asyncio.Event()
+            context = AppContext(
+                {}, SimpleNamespace(user_id=str(socket.user_id)), None, socket, router,
+                lambda text, ready=event: ready.set() if text == "等待当前战斗结束" else None,
+            )
+            context.player_initialized = True
+            sockets.append(socket)
+            contexts.append(context)
+            waiting.append(event)
+            tasks.append(asyncio.create_task(execute_combination(
+                str(index), context, [ScriptStep(script)], repetitions=2,
+                repeat_interval=0, message_delay=0,
+            )))
+        try:
+            for repetition in (1, 2):
+                live = [i for i in range(8) if not sockets[i].reject]
+                await asyncio.wait_for(asyncio.gather(*(waiting[i].wait() for i in live)), 2)
+                for i in live:
+                    if sockets[i].reject:
+                        continue
+                    assert sockets[i].matches == repetition and not tasks[i].done()
+                    contexts[i].messages.publish({"_cmd": 2403, "battleUniqueId": 999})
+                await asyncio.sleep(0)
+                for i in live:
+                    if not sockets[i].reject:
+                        assert sockets[i].matches == repetition and not tasks[i].done()
+                        waiting[i].clear()
+                        contexts[i].messages.publish({"_cmd": 2403, "battleUniqueId": repetition})
+            results = await asyncio.wait_for(asyncio.gather(*tasks), 2)
+            for index, (socket, context, result) in enumerate(zip(sockets, contexts, results)):
+                assert result.success == (not socket.reject)
+                assert result.completed_repetitions == (0 if socket.reject else 2)
+                network_sends = [item for item in result.send_results if item.ext_id >= 0]
+                assert len(network_sends) == (2 if socket.reject else 4)
+                assert sum(not item.success for item in network_sends) == int(socket.reject)
+                assert all(item.account_label == str(index) for item in result.send_results)
+                assert [item.sequence for item in result.send_results] == list(range(1, len(result.send_results) + 1))
+                if socket.reject:
+                    assert "你不是对应战场位置的所有者" in result.step_results[-1].error
+                    assert socket.matches == 1
+                    assert context.battle.phase == "active" and not context.battle.end_request_sent
+                else:
+                    assert context.battle.phase == "idle"
+                assert not context.messages._subscribers
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def late_rejection_or_missing_slot(missing_slot=False):
+        socket = FakeSocket(2000, 11, False)
+        router = MessageRouter(socket)
+        socket.router = router
+        waiting = asyncio.Event()
+        context = AppContext(
+            {}, SimpleNamespace(user_id="9999" if missing_slot else "2000"), None, socket, router,
+            lambda text: waiting.set() if text == "等待当前战斗结束" else None,
+        )
+        context.player_initialized = True
+        task = asyncio.create_task(battle_sequence_script.run(context))
+        try:
+            if not missing_slot:
+                await asyncio.wait_for(waiting.wait(), 2)
+                assert not task.done() and context.battle.phase == "ending"
+                router.publish({"_cmd": 2414, "msg": "你不是对应战场位置的所有者！"})
+            try:
+                await asyncio.wait_for(task, 2)
+                raise AssertionError("escape error must stop the script")
+            except RuntimeError as exc:
+                expected = "尚未确认己方战场位置" if missing_slot else "你不是对应战场位置的所有者"
+                assert expected in str(exc), exc
+            if missing_slot:
+                assert [cmd for cmd, _params in socket.sent] == ["trigger"]
+            assert context.battle.phase == "active" and not context.battle.end_request_sent
+            assert not router._subscribers
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    original = battle_sequence_script.BEFORE_STEPS, battle_sequence_script.execute_combination
+    try:
+        assert any(message.cmd == "#wait" for step in battle_sequence_script.AFTER_STEPS
+                   for message in step.messages)
+        battle_sequence_script.BEFORE_STEPS = (MessageBatchStep((SendMessage(42, "trigger", {}),)),)
+        battle_sequence_script.execute_combination = fast_combination
+        asyncio.run(exercise())
+        asyncio.run(late_rejection_or_missing_slot())
+        asyncio.run(late_rejection_or_missing_slot(missing_slot=True))
+    finally:
+        battle_sequence_script.BEFORE_STEPS, battle_sequence_script.execute_combination = original
+    print("=== Battle Escape Confirmation ===")
+    print("  own slots 0/11 + eight accounts + rejection isolation + matching 2403 before repeat [OK]")
+
+
 def test_menu_index_selection():
     assert parse_index_selection("2,1,2", 3, allow_all=True) == [1, 0]
     assert parse_index_selection("全部", 3, allow_all=True) == [0, 1, 2]
@@ -2651,10 +3617,21 @@ if __name__ == "__main__":
     test_fixed_role_login_contract()
     test_explicit_zone_selection()
     test_fixed_role_http_sequence()
+    test_password_login_flow()
+    test_browser_password_sequence()
     test_login_failure_diagnostics()
     test_bridge_account_config_persistence()
     test_bridge_connection_status_is_incremental()
+    test_bridge_bulk_send_does_not_flood_events()
+    test_bridge_script_and_combination_reporting()
+    test_bridge_bulk_disconnect_does_not_flood_events()
+    test_bridge_bulk_failures_keep_details_without_ui_flood()
+    test_bridge_login_queue_covers_initialization_and_cancellation()
+    test_login_refusal_pauses_queue_and_preserves_ready_connections()
+    test_manual_verification_queue()
+    test_login_progress_reports_failures_before_batch_finishes()
     test_account_connection_failure_isolation()
+    test_tcp_handshake_eof_and_connection_cleanup()
     test_receive_error_does_not_fake_disconnect()
     test_battle_receive_trace_filter_and_payload()
     test_player_context_initialization()
@@ -2674,5 +3651,6 @@ if __name__ == "__main__":
     test_combined_message_and_script_execution()
     test_multi_account_combination_isolation()
     test_battle_sequence_script()
+    test_battle_escape_slot_and_confirmation()
     test_menu_index_selection()
     print("\n=== All tests passed ===")

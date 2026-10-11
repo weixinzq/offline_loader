@@ -1,0 +1,9 @@
+放亚比，然后 开匹配
+
+
+
+
+#send={"id":42,"param":{"mt":1},"cmd":"SA231229_match"}|
+#send={"id":42,"param":{"tid":302},"cmd":"AHM230616_1"}|
+
+#send={"id":13,"param":{"turn":0,"reqPSId":0},"cmd":"1404"}|     逃跑  

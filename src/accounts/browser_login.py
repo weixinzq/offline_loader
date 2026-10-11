@@ -90,7 +90,7 @@ async def _post_form(page, url, params, stage, account, password, timeout=300):
 async def browser_login(account, password, char_id, login_url, register_url):
     from src.accounts.login import (
         _save_login_failure, build_login_params, parse_login_response,
-        parse_role_response, select_role,
+        parse_role_response, select_role, validate_game_login,
     )
 
     try:
@@ -123,14 +123,9 @@ async def browser_login(account, password, char_id, login_url, register_url):
                             await page.wait_for_load_state("domcontentloaded")
                             continue
                         result = parse_login_response(text)
-                        if not result.success:
-                            raise ValueError(result.error_msg)
-                        if result.user_id != role.user_id:
-                            raise ValueError(f"角色校验失败：charId={char_id} 的 userId 不匹配")
-                        if not result.session_id:
-                            raise ValueError("浏览器登录响应缺少 sid")
+                        validate_game_login(result, account, role)
                         return result
-                    except ValueError as exc:
+                    except (ValueError, ConnectionError) as exc:
                         raise BrowserLoginStopped(_save_login_failure(
                             stage, url, response, body, str(exc), account, password,
                         )) from None

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Sequence, TypeAlias
 
 from src.messaging.dispatcher import (
@@ -13,7 +13,7 @@ from src.messaging.dispatcher import (
 )
 from src.messaging.parser import SendMessage
 from src.network.context import AppContext
-from src.scripting.loader import InteractionScript
+from src.scripting.loader import InteractionScript, ScriptExecutionError
 
 
 @dataclass(frozen=True)
@@ -177,36 +177,42 @@ async def execute_combination(
 
             if not isinstance(step, ScriptStep):
                 raise TypeError(f"不支持的组合步骤类型：{type(step).__name__}")
+            script_sends: tuple[SendResult, ...] = ()
+            script_error = ""
             try:
-                await step.script.run(context)
+                script_sends = await step.script.run(context) or ()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                step_results.append(
-                    CombinationStepResult(
-                        repetition,
-                        step_number,
-                        "script",
-                        step.description,
-                        False,
-                        f"{type(exc).__name__}: {exc}",
-                    )
+                script_error = f"{type(exc).__name__}: {exc}"
+                if isinstance(exc, ScriptExecutionError):
+                    script_sends = exc.send_results
+            for item in script_sends:
+                send_results.append(
+                    replace(item, account_label=account_label, sequence=next_message_sequence)
                 )
-                return CombinationResult(
-                    repetitions,
-                    completed_repetitions,
-                    tuple(step_results),
-                    tuple(send_results),
-                )
+                next_message_sequence += 1
+            if not script_error:
+                failure = next((item for item in script_sends if not item.success), None)
+                if failure is not None:
+                    script_error = failure.error or "脚本消息发送失败"
             step_results.append(
                 CombinationStepResult(
                     repetition,
                     step_number,
                     "script",
                     step.description,
-                    True,
+                    not script_error,
+                    script_error,
                 )
             )
+            if script_error:
+                return CombinationResult(
+                    repetitions,
+                    completed_repetitions,
+                    tuple(step_results),
+                    tuple(send_results),
+                )
             if step_number < len(steps) and message_delay > 0:
                 await asyncio.sleep(message_delay)
 

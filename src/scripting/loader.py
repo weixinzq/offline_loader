@@ -9,9 +9,16 @@ from types import ModuleType
 from typing import Awaitable, Callable
 
 from src.config import RESOURCE_ROOT
+from src.messaging.dispatcher import SendResult
 from src.network.context import AppContext
 
-ScriptRunner = Callable[[AppContext], Awaitable[None]]
+ScriptRunner = Callable[[AppContext], Awaitable[None | tuple[SendResult, ...]]]
+
+
+class ScriptExecutionError(RuntimeError):
+    def __init__(self, message: str, send_results: tuple[SendResult, ...]) -> None:
+        super().__init__(message)
+        self.send_results = send_results
 
 
 @dataclass(frozen=True)

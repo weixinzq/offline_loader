@@ -216,13 +216,13 @@ async def _execute_instruction(context: AppContext, message: SendMessage) -> Non
                 raise ConnectionError("等待战斗结束期间账号已断开")
             if battle.phase == "unknown":
                 raise RuntimeError(battle.last_error or "战斗状态未知")
+            if battle.last_error:
+                raise RuntimeError(battle.last_error)
             if epoch is None and battle.phase in {"active", "ending"}:
                 epoch = battle.battle_epoch
             if epoch is not None and battle.battle_epoch != epoch:
                 raise RuntimeError("等待期间战斗身份已改变")
             if battle.phase == "idle":
-                if battle.last_error:
-                    raise RuntimeError(battle.last_error)
                 break
             try:
                 await subscription.wait_for(lambda _message: True, timeout=1.0)
@@ -231,6 +231,14 @@ async def _execute_instruction(context: AppContext, message: SendMessage) -> Non
         _context_log(context, "当前战斗已结束或不在战斗中，继续消息序列")
     finally:
         subscription.close()
+
+
+def _escape_params(context: AppContext, params: dict) -> dict:
+    own = context.auto_battle.players.get(int(context.user_id), {})
+    slot = own.get("battleView", {}).get("slotId")
+    if isinstance(slot, bool) or not isinstance(slot, int) or slot < 0:
+        raise RuntimeError("尚未确认己方战场位置，不能发送逃跑消息")
+    return {**params, "reqPSId": slot}
 
 
 async def _end_previous_battle(context: AppContext, delay: float) -> None:
@@ -246,11 +254,18 @@ async def _end_previous_battle(context: AppContext, delay: float) -> None:
         auto_battle = getattr(context, "auto_battle", None)
         if auto_battle is not None:
             auto_battle.disable()
-        await context.socket.send_xt_message(13, "1404", {"turn": 0, "reqPSId": 0})
+        params = _escape_params(context, {"turn": 0})
         battle.mark_end_requested()
+        try:
+            await context.socket.send_xt_message(13, "1404", params)
+        except Exception:
+            battle.end_request_sent = False
+            raise
         _context_log(context, "已提交上一场战斗结束 1404")
         if delay > 0:
             await asyncio.sleep(delay)
+    if battle.last_error:
+        raise RuntimeError(battle.last_error)
     battle.finish_without_confirmation()
 
 
@@ -302,12 +317,21 @@ class _BattleExecutor:
         self.failure_item = item
         self._assert_live_context()
         params = dict(item.message.param)
-        await self.context.socket.send_xt_message(item.message.id, item.message.cmd, params)
         if item.message.cmd == "1404":
+            params = _escape_params(self.context, params)
             self.context.battle.mark_end_requested()
+        try:
+            await self.context.socket.send_xt_message(item.message.id, item.message.cmd, params)
+        except Exception:
+            if item.message.cmd == "1404":
+                self.context.battle.end_request_sent = False
+            raise
+        if item.message.cmd == "1404":
             auto_battle = getattr(self.context, "auto_battle", None)
             if auto_battle is not None:
                 auto_battle.disable()
+            if self.context.battle.last_error:
+                raise RuntimeError(self.context.battle.last_error)
         elif item.message.cmd == "1409":
             auto_battle = getattr(self.context, "auto_battle", None)
             if auto_battle is not None:

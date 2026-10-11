@@ -8,6 +8,7 @@ from typing import Awaitable, Callable
 from src.network.context import AppContext
 from src.accounts.session import open_context
 from src.accounts.browser_login import BrowserLoginStopped
+from src.accounts.login import LoginBlockedError
 
 
 class AccountConfigError(ValueError):
@@ -87,6 +88,7 @@ class AccountConnection:
     last_error: str = ""
     attempts: int = 0
     retryable: bool = True
+    login_block_reason: str = ""
 
     @property
     def online(self) -> bool:
@@ -121,6 +123,7 @@ class AccountConnection:
 
         self.last_error = ""
         self.retryable = True
+        self.login_block_reason = ""
         for attempt in range(1, retries + 1):
             self.attempts = attempt
             self.state = "登录中"
@@ -132,6 +135,12 @@ class AccountConnection:
             except BrowserLoginStopped as exc:
                 self.last_error = str(exc)
                 self.state = "验证未完成"
+                self.retryable = False
+                return False
+            except LoginBlockedError as exc:
+                self.last_error = str(exc)
+                self.login_block_reason = exc.reason
+                self.state = "登录被拒绝"
                 self.retryable = False
                 return False
             except Exception as exc:

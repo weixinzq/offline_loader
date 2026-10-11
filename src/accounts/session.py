@@ -5,7 +5,9 @@ import asyncio
 import logging
 
 from src.network.context import AppContext, MessageRouter
-from src.accounts.login import LoginResult, ZoneData, http_login
+from src.accounts.login import LoginBlockedError, LoginResult, ZoneData, http_login
+from src.accounts.browser_login import browser_login
+from src.config import default_config
 from src.network.socket_client import login_and_connect
 from src.protocol.operations import init_game
 
@@ -23,16 +25,27 @@ def select_zone(result: LoginResult, preferred_zone: int = 1025) -> ZoneData | N
     )
 
 
-async def authenticate(config: dict) -> tuple[LoginResult, ZoneData]:
-    result = await http_login(
-        config["account"],
-        config["password"],
-        char_id=int(config.get("char_id", 0)),
-        login_url=config.get("login_url"),
-        register_url=config.get("register_url"),
-        browser_verification=bool(config.get("browser_verification", False)),
-    )
+async def authenticate(config: dict, *, interactive: bool = False) -> tuple[LoginResult, ZoneData]:
+    if interactive:
+        defaults = default_config()
+        result = await browser_login(
+            config["account"], config["password"], int(config.get("char_id", 0)),
+            config.get("login_url") or defaults["login_url"],
+            config.get("register_url") or defaults["register_url"],
+        )
+    else:
+        result = await http_login(
+            config["account"],
+            config["password"],
+            char_id=int(config.get("char_id", 0)),
+            login_url=config.get("login_url"),
+            register_url=config.get("register_url"),
+            browser_verification=bool(config.get("browser_verification", False)),
+            timeout=float(config.get("timeout", 30)),
+        )
     if not result.success:
+        if result.blocked_reason:
+            raise LoginBlockedError(result.blocked_reason, result.error_msg)
         raise ConnectionError(result.error_msg or "HTTP 登录失败")
 
     zone_index = int(config.get("zone_index", 1))
@@ -166,8 +179,8 @@ def start_player_initialization(
     )
 
 
-async def open_context(config: dict) -> AppContext:
-    result, zone = await authenticate(config)
+async def open_context(config: dict, *, interactive: bool = False) -> AppContext:
+    result, zone = await authenticate(config, interactive=interactive)
     socket = await login_and_connect(
         zone,
         result.user_id,

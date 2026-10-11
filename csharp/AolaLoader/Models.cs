@@ -1,11 +1,23 @@
+using System.ComponentModel;
 using System.Text.Json;
 
 namespace AolaLoader;
 
-public sealed class AccountItem
+public sealed class AccountItem : INotifyPropertyChanged
 {
     public required string Label { get; init; }
-    public string Status { get; init; } = "离线";
+    private string _status = "离线";
+    public string Status
+    {
+        get => _status;
+        set
+        {
+            if (_status == value) return;
+            _status = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Status)));
+        }
+    }
+    public event PropertyChangedEventHandler? PropertyChanged;
 }
 
 public sealed class ScriptItem
