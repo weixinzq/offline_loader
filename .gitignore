@@ -1,41 +1,77 @@
-# Python 缓存
-__pycache__/
-*.py[cod]
-
-# 本地配置（可能包含账号、密码、服务器地址）
-
+# 本地账号、配置和环境变量（保留脱敏示例）
 .env
 .env.*
 !.env.example
+config.json
+config.*.json
+config__.json
+!config.example.json
+accounts.json
+accounts.*
+accounts_*
+credentials.json
+credentials.*
+credentials_*
+cookies.json
+cookies.txt
+cookies_*
+tokens.json
+tokens.*
+*.session
+*.session-journal
+
+# 私钥和含私钥的证书
+*.key
+*.pem
+*.pfx
+*.p12
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+
+# Python 缓存、虚拟环境和测试缓存
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # 编辑器的个人配置
 .vscode/
 .idea/
 
-# 日志和崩溃报告
+# 日志、崩溃报告和本地诊断证据
 *.log
-/logs/
 hs_err_pid*.log
-
-# 本地抓包、登录响应和诊断证据
+/log/
+/logs/
 /evidence/
-
-# 本地 Git 历史安全备份
 /.git-backups/
 
-# 从线上页面保存的逆向分析产物
-/gamemain~*.js
-
-# 网络抓包及解包结果
+# 网络抓包、解包和逆向分析产物
 *.saz
 *.pcap
 *.pcapng
 saz_extract/
-
-# Flash 二进制文件
 *.swf
 ffdec_export/
 activity240906/
+/gamemain~*.js
+/analysis/
+/tte/
+
+# 桌面程序构建产物
+/build/
+/dist/
+**/bin/
+**/obj/
+
 # 临时文件
 *.tmp
 *.bak
@@ -43,25 +79,9 @@ activity240906/
 .DS_Store
 Thumbs.db
 
-# 桌面程序构建产物
-/build/
-/dist/
-**/bin/
-**/obj/
-/log/
+# 本地任务说明和调度入口
 prompt.md
 TASK.md
-
-
-#指定文件
 process.md
-
-/dist/logs/
-/dist/accounts.json
-/dist/config.json
-config__.json
-/analysis/
-scheduled_run.ps1
 read.md
-config__.json
-/config.json
+scheduled_run.ps1
