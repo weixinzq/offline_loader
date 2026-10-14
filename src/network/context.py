@@ -28,6 +28,7 @@ _INITIALIZATION_TRACE_COMMANDS = frozenset(
 _battle_receive_log_path: Path | None = None
 _battle_receive_log_lock = threading.Lock()
 _battle_receive_log_error_reported = False
+_battle_receive_record_filter: Callable[[dict], dict] | None = None
 
 
 def _is_battle_trace_message(message: dict) -> bool:
@@ -46,9 +47,13 @@ def _battle_trace_json_default(value: object) -> object:
     return str(value)
 
 
-def configure_battle_receive_logging(log_directory: Path | None = None) -> Path:
+def configure_battle_receive_logging(
+    log_directory: Path | None = None, *, record_filter: Callable[[dict], dict] | None = None,
+) -> Path:
     """Create one flushed JSONL file for decoded battle receive messages."""
     global _battle_receive_log_path
+    global _battle_receive_record_filter
+    _battle_receive_record_filter = record_filter
     if _battle_receive_log_path is not None:
         return _battle_receive_log_path
 
@@ -59,6 +64,8 @@ def configure_battle_receive_logging(log_directory: Path | None = None) -> Path:
         path = directory / f"aola-recv-{stamp}.jsonl"
         path.touch(exist_ok=True)
     except OSError:
+        if log_directory is not None:
+            raise
         directory = Path(tempfile.gettempdir()) / "AolaLoader" / "logs"
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"aola-recv-{stamp}.jsonl"
@@ -84,7 +91,7 @@ def _append_battle_receive_trace(message: dict) -> None:
             "param": message,
         }
         line = json.dumps(
-            record,
+            _battle_receive_record_filter(record) if _battle_receive_record_filter else record,
             ensure_ascii=False,
             separators=(",", ":"),
             default=_battle_trace_json_default,

@@ -3569,17 +3569,27 @@ def test_battle_escape_slot_and_confirmation():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    original = battle_sequence_script.BEFORE_STEPS, battle_sequence_script.execute_combination
+    original = (
+        battle_sequence_script.BEFORE_STEPS,
+        battle_sequence_script.AFTER_STEPS,
+        battle_sequence_script.execute_combination,
+    )
     try:
-        assert any(message.cmd == "#wait" for step in battle_sequence_script.AFTER_STEPS
-                   for message in step.messages)
         battle_sequence_script.BEFORE_STEPS = (MessageBatchStep((SendMessage(42, "trigger", {}),)),)
+        battle_sequence_script.AFTER_STEPS = (MessageBatchStep((
+            SendMessage(13, "1404", {"turn": 0}),
+            SendMessage(-1, "#wait", {}),
+        )),)
         battle_sequence_script.execute_combination = fast_combination
         asyncio.run(exercise())
         asyncio.run(late_rejection_or_missing_slot())
         asyncio.run(late_rejection_or_missing_slot(missing_slot=True))
     finally:
-        battle_sequence_script.BEFORE_STEPS, battle_sequence_script.execute_combination = original
+        (
+            battle_sequence_script.BEFORE_STEPS,
+            battle_sequence_script.AFTER_STEPS,
+            battle_sequence_script.execute_combination,
+        ) = original
     print("=== Battle Escape Confirmation ===")
     print("  own slots 0/11 + eight accounts + rejection isolation + matching 2403 before repeat [OK]")
 

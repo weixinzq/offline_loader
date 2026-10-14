@@ -88,6 +88,9 @@ async def _post_form(page, url, params, stage, account, password, timeout=300):
 
 
 async def browser_login(account, password, char_id, login_url, register_url):
+    from src.network.proxy import process_proxy
+    if process_proxy():
+        raise BrowserLoginStopped("代理任务遇到验证码，请停止后人工处理；不启动直连浏览器")
     from src.accounts.login import (
         _save_login_failure, build_login_params, parse_login_response,
         parse_role_response, select_role, validate_game_login,

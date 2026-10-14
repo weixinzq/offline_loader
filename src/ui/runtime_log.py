@@ -46,27 +46,32 @@ class LoggerStream:
         return False
 
 
-def _select_log_path() -> Path:
+def _select_log_path(log_directory: Path | None = None) -> Path:
     day = datetime.now().astimezone().strftime("%Y%m%d")
-    preferred = PROJECT_ROOT / "logs" / f"runtime-{day}.log"
+    preferred = (log_directory or PROJECT_ROOT / "logs") / f"runtime-{day}.log"
     try:
         preferred.parent.mkdir(parents=True, exist_ok=True)
         with preferred.open("a", encoding="utf-8"):
             pass
         return preferred
     except OSError:
+        if log_directory is not None:
+            raise
         fallback = Path(tempfile.gettempdir()) / "AolaLoader" / "logs"
         fallback.mkdir(parents=True, exist_ok=True)
         return fallback / f"runtime-{day}.log"
 
 
-def configure_runtime_logging(capture_console: bool = True) -> Path:
+def configure_runtime_logging(
+    capture_console: bool = True, log_directory: Path | None = None,
+    log_filter: logging.Filter | None = None,
+) -> Path:
     """Configure rotating UTF-8 logs once and return the active file path."""
     global _runtime_log_path
     if _runtime_log_path is not None:
         return _runtime_log_path
 
-    path = _select_log_path()
+    path = _select_log_path(log_directory)
     handler = RotatingFileHandler(
         path,
         maxBytes=5 * 1024 * 1024,
@@ -78,6 +83,8 @@ def configure_runtime_logging(capture_console: bool = True) -> Path:
             "%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s"
         )
     )
+    if log_filter is not None:
+        handler.addFilter(log_filter)
 
     root = logging.getLogger()
     root.setLevel(logging.INFO)
@@ -86,7 +93,10 @@ def configure_runtime_logging(capture_console: bool = True) -> Path:
     logger.info("desktop runtime logging started: %s", path)
     from src.network.context import configure_battle_receive_logging
 
-    battle_receive_path = configure_battle_receive_logging(path.parent)
+    record_filter = getattr(log_filter, "data", None)
+    battle_receive_path = configure_battle_receive_logging(
+        path.parent, **({"record_filter": record_filter} if callable(record_filter) else {}),
+    )
     logger.info("battle receive logging started: %s", battle_receive_path)
 
     if capture_console:

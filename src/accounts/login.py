@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+from pathlib import Path
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -12,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 import aiohttp
+from aiohttp_socks import ProxyConnectionError, ProxyError, ProxyTimeoutError
 
 from src.accounts.browser_login import browser_login, is_captcha_page
 from src.config import PROJECT_ROOT, load_user_config, default_config
@@ -244,7 +247,7 @@ def _save_login_failure(stage, request_url, response, body, error, account, pass
     else:
         analysis = "角色查询或登录失败，详见错误与响应正文"
     now = datetime.now(timezone.utc)
-    output_dir = PROJECT_ROOT / "evidence" / "login-failures"
+    output_dir = Path(os.environ["AOLA_DIAGNOSTIC_DIR"]) if os.environ.get("AOLA_DIAGNOSTIC_DIR") else PROJECT_ROOT / "evidence" / "login-failures"
     name = f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{stage}"
     metadata_path = output_dir / f"{name}.json"
     body_path = output_dir / f"{name}.response.txt"
@@ -285,6 +288,7 @@ async def http_login(
     register_url: Optional[str] = None,
     browser_verification: bool = False,
     timeout: Optional[float] = None,
+    proxy_url: Optional[str] = None,
 ) -> LoginResult:
     """Query the configured role and return the selected role's login result."""
     conf = load_user_config()
@@ -312,7 +316,10 @@ async def http_login(
     response = None
     response_body = b""
     try:
-        async with aiohttp.ClientSession() as session:
+        from src.network.proxy import process_proxy, proxy_connector
+        effective_proxy = proxy_url or process_proxy()
+        session_options = {"connector": proxy_connector(effective_proxy)} if effective_proxy else {}
+        async with aiohttp.ClientSession(**session_options) as session:
             async def post(url, params, name):
                 nonlocal stage, request_url, response, response_body
                 stage, request_url, response, response_body = name, url, None, b""
@@ -333,6 +340,8 @@ async def http_login(
         result = LoginResult(success=False, error_msg=str(e))
     except aiohttp.ClientError as e:
         result = LoginResult(success=False, error_msg=f"HTTP error: {e}")
+    except (ProxyConnectionError, ProxyError, ProxyTimeoutError) as e:
+        result = LoginResult(success=False, error_msg=f"Proxy error: {e}")
     except asyncio.TimeoutError:
         result = LoginResult(success=False, error_msg="Login request timed out")
     if not result.success:
@@ -345,6 +354,8 @@ async def http_login(
             stage, request_url, response, response_body, result.error_msg, account, password
         )
         if browser_verification and is_captcha_page(response_body.decode("utf-8", errors="replace")):
+            if effective_proxy:
+                return result  # The headless worker must not open a direct browser.
             print(f"[登录验证] {result.error_msg}", flush=True)
             return await browser_login(account, password, char_id, login_url, register_url)
     return result

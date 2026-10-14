@@ -42,6 +42,7 @@ async def authenticate(config: dict, *, interactive: bool = False) -> tuple[Logi
             register_url=config.get("register_url"),
             browser_verification=bool(config.get("browser_verification", False)),
             timeout=float(config.get("timeout", 30)),
+            **({"proxy_url": config["proxy_url"]} if config.get("proxy_url") else {}),
         )
     if not result.success:
         if result.blocked_reason:
@@ -186,6 +187,7 @@ async def open_context(config: dict, *, interactive: bool = False) -> AppContext
         result.user_id,
         result.session_id,
         timeout=float(config.get("timeout", 2)),
+        **({"proxy_url": config["proxy_url"]} if config.get("proxy_url") else {}),
     )
     if socket is None:
         raise ConnectionError("游戏长连接登录失败")

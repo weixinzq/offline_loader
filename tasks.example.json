@@ -1,0 +1,30 @@
+{
+  "accounts_file": "config.json",
+  "clash": {
+    "binary": "../runtime/mihomo/mihomo",
+    "config": "../clash/nodes.yaml"
+  },
+  "workers": [
+    {
+      "id": "battle",
+      "accounts": {"ranges": [[1, 2]], "labels": []},
+      "proxy": {"port": 17891, "node": "节点A"},
+      "mode": "bounded",
+      "concurrency": 5,
+      "repetitions": 10,
+      "repeat_interval": 0.2,
+      "message_delay": 0.2,
+      "steps": [{"kind": "script", "module": "scripts.auto_battle"}]
+    },
+    {
+      "id": "escape",
+      "accounts": {"ranges": [[5, 6]], "labels": []},
+      "proxy": {"port": 17892, "node": "节点B"},
+      "mode": "all_online",
+      "concurrency": 5,
+      "repetitions": 10,
+      "repeat_interval": 0.2,
+      "steps": [{"kind": "script", "module": "scripts.auto_escape"}]
+    }
+  ]
+}

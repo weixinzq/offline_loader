@@ -12,6 +12,8 @@ analysis = Analysis(
         ("scripts/mt250816_4.py", "scripts"),
         ("scripts/auto_battle.py", "scripts"),
         ("scripts/auto_escape.py", "scripts"),
+        ("scripts/double_auto_escape.py", "scripts"),
+        ("scripts/wait_escape.py", "scripts"),
         ("scripts/rank_info.py", "scripts"),
     ],
     hiddenimports=[
@@ -21,6 +23,8 @@ analysis = Analysis(
         "scripts.mt250816_4",
         "scripts.auto_battle",
         "scripts.auto_escape",
+        "scripts.double_auto_escape",
+        "scripts.wait_escape",
         "scripts.rank_info",
     ],
     hookspath=[],

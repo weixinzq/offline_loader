@@ -48,7 +48,9 @@ class GameSocket:
     """
     游戏 TCP/WebSocket 客户端 — 完整协议栈
     """
-    def __init__(self, session_id: str = ""):
+    def __init__(self, session_id: str = "", proxy_url: str | None = None):
+        from src.network.proxy import process_proxy
+        self.proxy_url = proxy_url or process_proxy()
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._ws: Any = None  # websockets connection
@@ -80,9 +82,20 @@ class GameSocket:
     async def connect_tcp(self, host: str, port: int, timeout: float = 15.0) -> bool:
         """原始 TCP 连接 (Flash 端口)"""
         try:
-            self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port), timeout=timeout
-            )
+            if self.proxy_url:
+                from src.network.proxy import proxy_socket
+                sock = await proxy_socket(self.proxy_url, host, port, timeout)
+                try:
+                    self._reader, self._writer = await asyncio.wait_for(
+                        asyncio.open_connection(sock=sock), timeout=timeout
+                    )
+                except BaseException:
+                    sock.close()
+                    raise
+            else:
+                self._reader, self._writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port), timeout=timeout
+                )
             self._connected = True
             self._use_ws = False
             self.disconnect_reason = ""
@@ -125,12 +138,24 @@ class GameSocket:
             ssl_ctx = ssl.create_default_context()
             ssl_ctx.check_hostname = False
             ssl_ctx.verify_mode = ssl.CERT_NONE
-            self._ws = await asyncio.wait_for(
-                websockets.connect(ws_url, ping_interval=None, ssl=ssl_ctx,
-                                   additional_headers={"Origin": "https://aola.100bt.com"},
-                                   user_agent_header="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
-                timeout=timeout
-            )
+            connection_options = {}
+            sock = None
+            if self.proxy_url:
+                from src.network.proxy import proxy_socket
+                sock = await proxy_socket(self.proxy_url, domain, port, timeout)
+                connection_options = {"sock": sock, "proxy": None}
+            try:
+                self._ws = await asyncio.wait_for(
+                    websockets.connect(ws_url, ping_interval=None, ssl=ssl_ctx,
+                                       additional_headers={"Origin": "https://aola.100bt.com"},
+                                       user_agent_header="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                                       **connection_options),
+                    timeout=timeout
+                )
+            except BaseException:
+                if sock is not None:
+                    sock.close()
+                raise
             self._connected = True
             self._use_ws = True
             self.disconnect_reason = ""
@@ -655,10 +680,11 @@ class GameSocket:
 
 async def login_and_connect(
     zone, user_id: str, session_id: str,
-    timeout: float = 15.0
+    timeout: float = 15.0,
+    proxy_url: str | None = None,
 ) -> GameSocket | None:
     """完整登录流程: TCP 或 WebSocket → 发送登录包 → 接收 logOK"""
-    sock = GameSocket(session_id)
+    sock = GameSocket(session_id, proxy_url=proxy_url) if proxy_url else GameSocket(session_id)
     retained = False
     try:
         # 策略 2: 原始 TCP (Flash port)
