@@ -69,6 +69,9 @@ activity240906/
 # 桌面程序构建产物
 /build/
 /dist/
+/data/service/
+frontend/node_modules/
+frontend/dist/
 **/bin/
 **/obj/
 

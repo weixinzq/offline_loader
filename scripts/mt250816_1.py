@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from src.network.context import AppContext
 from src.network.socket_client import GameSocket
-from src.messaging.dispatcher import DEFAULT_MESSAGE_DELAY, _end_previous_battle
+from src.messaging.dispatcher import DEFAULT_MESSAGE_DELAY, end_previous_battle
 #from src.protocol.operations import keep_mt250816_best
 import asyncio
 SCRIPT_NAME = "四象一"
@@ -80,4 +80,4 @@ async def run(context: AppContext) -> None:
     if context.battle.phase in {"active", "ending"}:
         if not context.battle.end_request_sent:
             await asyncio.sleep(DEFAULT_MESSAGE_DELAY)
-        await _end_previous_battle(context, 0)
+        await end_previous_battle(context, 0)

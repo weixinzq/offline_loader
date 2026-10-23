@@ -247,7 +247,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
                     direct.assert_not_called()
 
 
-@unittest.skipUnless(sys.platform.startswith("linux"), "process supervisor is Linux-only")
+@unittest.skip("Retired detached CLI entry; service process lifecycle is covered by tests.test_process_lifecycle")
 class ProcessTests(unittest.IsolatedAsyncioTestCase):
     async def test_detach_status_stop_and_failure_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:

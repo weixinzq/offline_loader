@@ -42,6 +42,8 @@ async def authenticate(config: dict, *, interactive: bool = False) -> tuple[Logi
             register_url=config.get("register_url"),
             browser_verification=bool(config.get("browser_verification", False)),
             timeout=float(config.get("timeout", 30)),
+            **({"network_mode": "system", "diagnostic_dir": config.get("diagnostic_dir")}
+               if config.get("network_mode") == "system" else {}),
             **({"proxy_url": config["proxy_url"]} if config.get("proxy_url") else {}),
         )
     if not result.success:
@@ -187,6 +189,7 @@ async def open_context(config: dict, *, interactive: bool = False) -> AppContext
         result.user_id,
         result.session_id,
         timeout=float(config.get("timeout", 2)),
+        **({"network_mode": "system"} if config.get("network_mode") == "system" else {}),
         **({"proxy_url": config["proxy_url"]} if config.get("proxy_url") else {}),
     )
     if socket is None:

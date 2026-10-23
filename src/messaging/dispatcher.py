@@ -8,11 +8,15 @@ from datetime import datetime
 from typing import Sequence
 
 from src.messaging.parser import SendMessage
+from src.messaging.battle_control import (
+    BattleRoundSkipped, BattleStateError, abort_round, note_sent,
+    current_round, wait_for_match, wait_for_end, wait_for_entry, ENTRY_TIMEOUT_SECONDS,
+)
 from src.network.context import AppContext
 
 
 DEFAULT_MESSAGE_DELAY = 0.2
-_BATTLE_RESPONSE_TIMEOUT = 45.0
+_BATTLE_RESPONSE_TIMEOUT = ENTRY_TIMEOUT_SECONDS
 _BATTLE_ENTRY_COMMAND = (15, "54_22")
 _ROOM_JOIN_COMMAND = (1, "cmdCreateAndJoinRoom")
 _PREFIGHT_COMMAND = (16, "preFightLoad")
@@ -80,6 +84,48 @@ class _BattleState:
     room_id: int
     battle_id: int | None = None
     current_turn: int | None = None
+
+
+def validate_messages(messages: Sequence[SendMessage]) -> None:
+    """Preflight a complete sequence without opening connections or sending."""
+    segment = []
+    for message in messages:
+        if message.id == -1 and message.cmd == "#wait":
+            if segment:
+                _build_dispatch_plan(segment)
+            segment = []
+        else:
+            segment.append(message)
+    if segment:
+        _build_dispatch_plan(segment)
+
+
+async def end_previous_battle(context: AppContext, delay: float = 0) -> None:
+    """Public script operation for finishing a previous battle safely."""
+    battle = context.battle
+    if battle.phase == "active" and not battle.end_request_sent:
+        _assert_automation_allowed(context)
+        if not context.socket.connected:
+            raise ConnectionError("账号连接已断开")
+        try:
+            params = _escape_params(context, {"turn": 0})
+        except BattleStateError as exc:
+            await abort_round(context, str(exc))
+        context.auto_battle.disable()
+        battle.mark_end_requested()
+        try:
+            await context.socket.send_xt_message(13, "1404", params)
+        except BaseException:
+            battle.end_request_sent = False
+            raise
+        _context_log(context, "已提交上一场战斗结束 1404")
+        if delay > 0:
+            await asyncio.sleep(delay)
+        if battle.last_error:
+            raise RuntimeError(battle.last_error)
+        battle.finish_without_confirmation()
+    elif battle.phase in {"entering", "unknown"}:
+        await abort_round(context, battle.last_error or f"当前战斗状态为 {battle.phase}")
 
 
 def _build_dispatch_plan(messages: Sequence[SendMessage]) -> _DispatchPlan:
@@ -205,68 +251,22 @@ async def _execute_instruction(context: AppContext, message: SendMessage) -> Non
         _assert_automation_allowed(context)
         return
 
-    battle = context.battle
-    subscription = context.messages.subscribe(max_queue_size=500)
-    epoch = None if battle.phase == "entering" else battle.battle_epoch
-    try:
-        _context_log(context, "等待当前战斗结束")
-        while True:
-            _assert_automation_allowed(context)
-            if not context.socket.connected or context.messages.disconnected.is_set():
-                raise ConnectionError("等待战斗结束期间账号已断开")
-            if battle.phase == "unknown":
-                raise RuntimeError(battle.last_error or "战斗状态未知")
-            if battle.last_error:
-                raise RuntimeError(battle.last_error)
-            if epoch is None and battle.phase in {"active", "ending"}:
-                epoch = battle.battle_epoch
-            if epoch is not None and battle.battle_epoch != epoch:
-                raise RuntimeError("等待期间战斗身份已改变")
-            if battle.phase == "idle":
-                break
-            try:
-                await subscription.wait_for(lambda _message: True, timeout=1.0)
-            except asyncio.TimeoutError:
-                pass
-        _context_log(context, "当前战斗已结束或不在战斗中，继续消息序列")
-    finally:
-        subscription.close()
+    await wait_for_end(context)
+
 
 
 def _escape_params(context: AppContext, params: dict) -> dict:
-    own = context.auto_battle.players.get(int(context.user_id), {})
+    own = next(iter(context.auto_battle.own_players), {})
     slot = own.get("battleView", {}).get("slotId")
     if isinstance(slot, bool) or not isinstance(slot, int) or slot < 0:
-        raise RuntimeError("尚未确认己方战场位置，不能发送逃跑消息")
+        raise BattleStateError("尚未确认己方战场位置，不能发送逃跑消息")
     return {**params, "reqPSId": slot}
 
 
 async def _end_previous_battle(context: AppContext, delay: float) -> None:
     battle = getattr(context, "battle", None)
-    if battle is None or battle.phase == "idle":
-        return
-    if battle.phase in {"entering", "unknown"}:
-        raise RuntimeError(battle.last_error or f"当前战斗状态为 {battle.phase}")
-    if battle.phase == "active" and not battle.end_request_sent:
-        _assert_automation_allowed(context)
-        if not context.socket.connected:
-            raise ConnectionError("账号连接已断开")
-        auto_battle = getattr(context, "auto_battle", None)
-        if auto_battle is not None:
-            auto_battle.disable()
-        params = _escape_params(context, {"turn": 0})
-        battle.mark_end_requested()
-        try:
-            await context.socket.send_xt_message(13, "1404", params)
-        except Exception:
-            battle.end_request_sent = False
-            raise
-        _context_log(context, "已提交上一场战斗结束 1404")
-        if delay > 0:
-            await asyncio.sleep(delay)
-    if battle.last_error:
-        raise RuntimeError(battle.last_error)
-    battle.finish_without_confirmation()
+    if battle is not None and battle.phase != "idle":
+        await abort_round(context, battle.last_error or f"上一场战斗状态为 {battle.phase}")
 
 
 class _BattleExecutor:
@@ -292,24 +292,25 @@ class _BattleExecutor:
         self.entry_started = False
         self.external_epoch: int | None = None
         self.failure_item: _MessageItem | None = None
+        self.previous_epoch = context.battle.battle_epoch
 
     def _assert_live_context(self) -> None:
         if not self.context.socket.connected:
             raise ConnectionError("账号连接已断开")
         if self.context.battle.phase == "unknown":
-            raise RuntimeError(
+            raise BattleStateError(
                 self.context.battle.last_error or "战斗状态未知，必须重新连接"
             )
         if self.external_epoch is not None and (
             self.context.battle.phase != "active"
             or self.context.battle.battle_epoch != self.external_epoch
         ):
-            raise RuntimeError("当前战斗已结束或战斗身份已改变")
+            raise BattleStateError("当前战斗已结束或战斗身份已改变")
         if self.state is None:
             return
         room_id = getattr(self.context.socket, "active_room_id", -1)
         if room_id != self.state.room_id:
-            raise RuntimeError(
+            raise BattleStateError(
                 f"战斗期间房间已改变：expected={self.state.room_id}, actual={room_id}"
             )
 
@@ -322,6 +323,7 @@ class _BattleExecutor:
             self.context.battle.mark_end_requested()
         try:
             await self.context.socket.send_xt_message(item.message.id, item.message.cmd, params)
+            note_sent(self.context, item.message.cmd)
         except Exception:
             if item.message.cmd == "1404":
                 self.context.battle.end_request_sent = False
@@ -350,7 +352,7 @@ class _BattleExecutor:
 
     async def _next_battle_message(self, deadline: float) -> dict:
         if self.subscription is None:
-            raise RuntimeError("战斗订阅尚未建立")
+            raise BattleStateError("战斗订阅尚未建立")
         self._assert_live_context()
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
@@ -366,18 +368,18 @@ class _BattleExecutor:
 
         cmd = str(message.get("_cmd", ""))
         if cmd == "2303" and message.get("msg"):
-            raise RuntimeError(f"服务器返回 {cmd}：{message['msg']}")
+            raise BattleStateError(f"服务器返回 {cmd}：{message['msg']}")
         if cmd in {"joinOK", "joinKO"}:
-            raise RuntimeError(f"战斗期间收到房间切换结果 {cmd}")
+            raise BattleStateError(f"战斗期间收到房间切换结果 {cmd}")
         if cmd == "2303":
             battle_id = message.get("battleId")
             if isinstance(battle_id, bool) or not isinstance(battle_id, int) or battle_id == 0:
-                raise RuntimeError(f"2303 未返回有效 battleId：{battle_id!r}")
+                raise BattleStateError(f"2303 未返回有效 battleId：{battle_id!r}")
             if self.state is not None:
                 if self.state.battle_id is None:
                     self.state.battle_id = battle_id
                 elif self.state.battle_id != battle_id:
-                    raise RuntimeError(
+                    raise BattleStateError(
                         "战斗身份已改变："
                         f"expected={self.state.battle_id}, actual={battle_id}"
                     )
@@ -387,57 +389,32 @@ class _BattleExecutor:
         if self.entry_ready:
             return
         if self.entry_item is None or self.state is None:
-            raise RuntimeError("尚未发送 54_22 战斗入口")
+            raise BattleStateError("尚未发送 54_22 战斗入口")
         self.failure_item = self.entry_item
         _context_log(self.context, "等待战斗入口 2303/2401/2426/2402")
-        seen: set[str] = set()
-        deadline = asyncio.get_running_loop().time() + _BATTLE_RESPONSE_TIMEOUT
-        while not _ENTRY_RESPONSES.issubset(seen):
-            response = await self._next_battle_message(deadline)
-            cmd = str(response.get("_cmd", ""))
-            if cmd == "2402":
-                turn = response.get("pt")
-                if isinstance(turn, bool) or not isinstance(turn, int) or turn < 0:
-                    raise RuntimeError(f"2402.pt 无效：{turn!r}")
-                self.state.current_turn = turn
-            if cmd in _ENTRY_RESPONSES:
-                seen.add(cmd)
-        if self.state.battle_id is None:
-            raise RuntimeError("战斗入口没有建立 battleId")
+        await wait_for_entry(self.context, self.subscription, self.previous_epoch)
+        self.state.battle_id = self.context.battle.battle_id
+        self.state.current_turn = self.context.battle.current_turn
         self.entry_ready = True
         self.subscription.close()
         self.subscription = None
         self.results[self.entry_item.index] = _make_result(
-            self.account_label, self.sequence_start, self.entry_item, True
-        )
-        _context_log(
-            self.context,
-            "战斗已就绪："
-            f"battleEpoch={self.context.battle.battle_epoch}, "
-            f"battleId={self.state.battle_id}, turn={self.state.current_turn}",
-        )
+            self.account_label, self.sequence_start, self.entry_item, True)
+        _context_log(self.context, f"战斗已就绪：battleId={self.state.battle_id}, turn={self.state.current_turn}")
 
     async def _ensure_external_entry_ready(self, item: _MessageItem) -> None:
         self.failure_item = item
-        if not self.context.battle.entry_ready:
-            _context_log(self.context, "等待当前账号的战斗入口 2303/2401/2426/2402")
-            deadline = asyncio.get_running_loop().time() + _BATTLE_RESPONSE_TIMEOUT
-            while not self.context.battle.entry_ready:
-                self._assert_live_context()
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise TimeoutError("等待当前账号进入战斗超时")
-                try:
-                    response = await self.subscription.wait_for(
-                        lambda candidate: str(candidate.get("_cmd", ""))
-                        in (_ENTRY_RESPONSES | {"2405", "2411", "2402", "2423"}),
-                        timeout=remaining,
-                    )
-                except asyncio.TimeoutError as exc:
-                    raise TimeoutError("等待当前账号进入战斗超时") from exc
-                if str(response.get("_cmd", "")) == "2303" and response.get("msg"):
-                    raise RuntimeError(f"服务器返回 2303：{response['msg']}")
-        self.external_epoch = self.context.battle.battle_epoch
+        battle = self.context.battle
+        scope = current_round(self.context)
+        if battle.phase == "idle":
+            if scope is not None and scope.entry_epoch == battle.battle_epoch:
+                await abort_round(self.context, "本次战斗在发送动作前已经结束")
+            if scope is not None and scope.match_deadline is not None:
+                await wait_for_match(self.context, self.subscription, battle.battle_epoch)
+        if not battle.entry_ready:
+            previous = battle.battle_epoch - (battle.phase == "active")
+            await wait_for_entry(self.context, self.subscription, previous)
+        self.external_epoch = battle.battle_epoch
         self.entry_ready = True
         self.subscription.close()
         self.subscription = None
@@ -518,6 +495,15 @@ class _BattleExecutor:
 
             if self.entry_item is not None and not self.entry_ready:
                 await self._ensure_entry_ready()
+        except BattleRoundSkipped as exc:
+            exc.prepend(self.results[index] for index in sorted(self.results))
+            raise
+        except (BattleStateError, TimeoutError) as error:
+            try:
+                await abort_round(self.context, str(error))
+            except BattleRoundSkipped as exc:
+                exc.prepend(self.results[index] for index in sorted(self.results))
+                raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -575,6 +561,10 @@ async def _execute_simple_plan(
                 await context.socket.send_xt_message(
                     item.message.id, item.message.cmd, dict(item.message.param)
                 )
+                note_sent(context, item.message.cmd)
+        except BattleRoundSkipped as exc:
+            exc.prepend(results)
+            raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -604,6 +594,8 @@ async def _execute_plan(
     ):
         try:
             await _end_previous_battle(context, delay)
+        except BattleRoundSkipped:
+            raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -655,33 +647,39 @@ async def execute_messages(
         message.id == -1 for message in messages
     )
     results: list[SendResult] = []
-    for operation_index, (start, operation) in enumerate(operations):
-        if isinstance(operation, _LocalInstruction):
-            try:
-                await _execute_instruction(context, operation.item.message)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                results.append(
-                    _make_result(
-                        account_label, sequence_start + start,
-                        operation.item, False, str(exc),
+    try:
+        for operation_index, (start, operation) in enumerate(operations):
+            if isinstance(operation, _LocalInstruction):
+                try:
+                    await _execute_instruction(context, operation.item.message)
+                except BattleRoundSkipped:
+                    raise
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    results.append(
+                        _make_result(
+                            account_label, sequence_start + start,
+                            operation.item, False, str(exc),
+                        )
                     )
+                    break
+                results.append(
+                    _make_result(account_label, sequence_start + start, operation.item, True)
                 )
-                break
-            results.append(
-                _make_result(account_label, sequence_start + start, operation.item, True)
-            )
-        else:
-            batch = await _execute_plan(
-                account_label, context, operation, delay, stop_on_error,
-                sequence_start + start, preserve_current_battle,
-            )
-            results.extend(batch)
-            if stop_on_error and any(not result.success for result in batch):
-                break
-        if operation_index + 1 < len(operations) and delay > 0:
-            await asyncio.sleep(delay)
+            else:
+                batch = await _execute_plan(
+                    account_label, context, operation, delay, stop_on_error,
+                    sequence_start + start, preserve_current_battle,
+                )
+                results.extend(batch)
+                if stop_on_error and any(not result.success for result in batch):
+                    break
+            if operation_index + 1 < len(operations) and delay > 0:
+                await asyncio.sleep(delay)
+    except BattleRoundSkipped as exc:
+        exc.prepend(results)
+        raise
     return results
 
 

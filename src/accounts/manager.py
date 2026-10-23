@@ -155,9 +155,10 @@ class AccountConnection:
 
     async def disconnect(self) -> None:
         context = self.context
-        self.context = None
         if context is not None:
             await context.close()
+            if self.context is context:
+                self.context = None
         self.state = "已断开"
 
 

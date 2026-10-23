@@ -12,6 +12,7 @@ import scripts.wait_escape as script
 from src.messaging.parser import SendMessage
 from src.network.context import AppContext, MessageRouter
 from src.scripting.composer import MessageBatchStep, execute_combination
+from src.messaging import battle_control
 from src.scripting.loader import ScriptExecutionError, discover_scripts
 
 
@@ -97,12 +98,11 @@ class WaitEscapeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(kwargs["preserve_current_battle"])
             return await execute_combination(*args, **kwargs, message_delay=0)
 
-        with patch.multiple(
+        with patch.multiple(battle_control, ENTRY_TIMEOUT_SECONDS=.1, MATCH_TIMEOUT_SECONDS=.1, WAIT_TIMEOUT_SECONDS=.1), patch.multiple(
             script,
             BEFORE_STEPS=(MessageBatchStep((SendMessage(42, "trigger", {}),)),),
             OPTIONAL_STEPS=(MessageBatchStep((SendMessage(42, "optional", {}),)),) if optional else (),
             AFTER_STEPS=(MessageBatchStep((SendMessage(42, "after", {}),)),),
-            WAIT_TIMEOUT_SECONDS=0.15,
             execute_combination=fast_combination,
         ):
             task = asyncio.create_task(script.run(context))
@@ -124,7 +124,7 @@ class WaitEscapeTests(unittest.IsolatedAsyncioTestCase):
             try:
                 results = await asyncio.wait_for(task, 2)
                 error = None
-            except (ScriptExecutionError, asyncio.CancelledError) as exc:
+            except (ScriptExecutionError, battle_control.BattleRoundSkipped, asyncio.CancelledError) as exc:
                 results = getattr(exc, "send_results", ())
                 error = exc
 
@@ -182,13 +182,13 @@ class WaitEscapeTests(unittest.IsolatedAsyncioTestCase):
     async def test_entry_errors_and_cancel_clean_up(self):
         for mode, text in (
             ("rejected", "test entry rejected"),
-            ("timeout", "未确认本次战斗完整就绪及对方背包"),
-            ("disconnect", "连接断开"),
+            ("timeout", "未确认本次战斗完整就绪"),
+            ("disconnect", "连接已断开"),
             ("cancel", None),
         ):
             with self.subTest(mode=mode):
                 sent, _, error = await self.exercise([pet(5999, '1;36;1:6')], mode=mode)
-                self.assertEqual(sent, ["trigger"])
+                self.assertEqual(sent, ["trigger", "1404", "1404"] if mode in {"rejected", "timeout"} else ["trigger"])
                 if text is None:
                     self.assertIsInstance(error, asyncio.CancelledError)
                 else:

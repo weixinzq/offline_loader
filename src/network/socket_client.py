@@ -48,9 +48,10 @@ class GameSocket:
     """
     游戏 TCP/WebSocket 客户端 — 完整协议栈
     """
-    def __init__(self, session_id: str = "", proxy_url: str | None = None):
+    def __init__(self, session_id: str = "", proxy_url: str | None = None, *, network_mode: str = "legacy"):
         from src.network.proxy import process_proxy
-        self.proxy_url = proxy_url or process_proxy()
+        self.proxy_url = None if network_mode == "system" else (proxy_url or process_proxy())
+        self._system_network = network_mode == "system"
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._ws: Any = None  # websockets connection
@@ -138,7 +139,7 @@ class GameSocket:
             ssl_ctx = ssl.create_default_context()
             ssl_ctx.check_hostname = False
             ssl_ctx.verify_mode = ssl.CERT_NONE
-            connection_options = {}
+            connection_options = {"proxy": None} if self._system_network else {}
             sock = None
             if self.proxy_url:
                 from src.network.proxy import proxy_socket
@@ -682,9 +683,13 @@ async def login_and_connect(
     zone, user_id: str, session_id: str,
     timeout: float = 15.0,
     proxy_url: str | None = None,
+    network_mode: str = "legacy",
 ) -> GameSocket | None:
     """完整登录流程: TCP 或 WebSocket → 发送登录包 → 接收 logOK"""
-    sock = GameSocket(session_id, proxy_url=proxy_url) if proxy_url else GameSocket(session_id)
+    if network_mode == "system":
+        sock = GameSocket(session_id, network_mode="system")
+    else:
+        sock = GameSocket(session_id, proxy_url=proxy_url) if proxy_url else GameSocket(session_id)
     retained = False
     try:
         # 策略 2: 原始 TCP (Flash port)

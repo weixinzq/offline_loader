@@ -49,6 +49,7 @@ def discover_scripts(directory: Path | None = None) -> list[InteractionScript]:
         if (
             path.name == "__init__.py"
             or path.name.startswith("_")
+            or path.stem.startswith("test_")
             or path.stem == "verify"
         ):
             continue

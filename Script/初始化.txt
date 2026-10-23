@@ -32,3 +32,4 @@
 #send={"id":42,"param":{"index":0},"cmd":"NW250523_gs"}|
 #send={"id":42,"param":{"eventId":45238},"cmd":"74_1"}|
 #send={"id":42,"param":{"mt":1,"ids":[7,2,3,7,2,3,4,5,6]},"cmd":"SA231229_sl"}|   
+#send={"id":42,"param":{"index":1},"cmd":"ALT250430_gs"}|

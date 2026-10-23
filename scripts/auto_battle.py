@@ -1,10 +1,10 @@
 """Run message steps, wait for a new battle, then run the remaining steps."""
 from __future__ import annotations
 
-import asyncio
 
 from src.messaging.parser import SendMessage
 from src.messaging.dispatcher import SendResult
+from src.messaging import battle_control
 from src.network.context import AppContext
 from src.scripting.composer import MessageBatchStep, ScriptStep, execute_combination
 from src.scripting.loader import InteractionScript, ScriptExecutionError
@@ -12,7 +12,6 @@ from src.messaging.parser import parse_send_message
 
 SCRIPT_NAME = "多排自动匹配战斗"
 SCRIPT_DESCRIPTION = "前置消息步骤 → 等待新战斗就绪 → 后置消息步骤"
-WAIT_TIMEOUT_SECONDS = 60.0
 
 # 在这里填写消息。每个 MessageBatchStep 是一个步骤，内部消息按顺序执行。
 # 前后均可添加多个步骤；参数未填写时，脚本会报错，不发送消息。
@@ -63,54 +62,16 @@ async def run(context: AppContext) -> tuple[SendResult, ...]:
     context.assert_automation_allowed()
     if not context.socket.connected or context.messages.disconnected.is_set():
         raise ConnectionError("账号连接已断开")
-    if context.battle.phase != "idle":
-        raise RuntimeError("当前已有战斗或战斗状态未确认，不能触发新战斗")
+    await battle_control.require_idle(context)
 
     previous_epoch = context.battle.battle_epoch
-    expected_epoch = previous_epoch + 1
     # 在前置消息发送之前订阅，保留即时回包；不另开底层接收循环。
     subscription = context.messages.subscribe(max_queue_size=500)
 
     async def wait_for_entry(wait_context: AppContext) -> None:
         wait_context.log("前置步骤已提交，等待本次战斗完整就绪")
-        try:
-            async with asyncio.timeout(WAIT_TIMEOUT_SECONDS):
-                while True:
-                    wait_context.assert_automation_allowed()
-                    if (
-                        not wait_context.socket.connected
-                        or wait_context.messages.disconnected.is_set()
-                    ):
-                        raise ConnectionError("等待进入战斗期间连接断开")
-                    battle = wait_context.battle
-                    if battle.phase == "unknown":
-                        raise RuntimeError(battle.last_error or "战斗状态未知")
-                    if battle.battle_epoch not in {previous_epoch, expected_epoch}:
-                        raise RuntimeError("等待期间战斗身份已改变")
-                    if battle.battle_epoch == expected_epoch:
-                        if battle.phase == "idle":
-                            raise RuntimeError("本次战斗在就绪前已经结束")
-                        if battle.entry_ready:
-                            break
-                    try:
-                        message = await subscription.wait_for(
-                            lambda m: True, timeout=1
-                        )
-                    except asyncio.TimeoutError:
-                        continue
-                    if (
-                        str(message.get("_cmd", "")) == "2303"
-                        and message.get("msg")
-                    ):
-                        raise RuntimeError(str(message["msg"]))
-        except TimeoutError as exc:
-            raise TimeoutError(
-                f"{WAIT_TIMEOUT_SECONDS:g} 秒内未确认本次战斗完整就绪"
-            ) from exc
-        wait_context.log(
-            f"本次战斗已就绪：battleId={wait_context.battle.battle_id}，"
-            f"turn={wait_context.battle.current_turn}"
-        )
+        await battle_control.wait_for_entry(wait_context, subscription, previous_epoch)
+        wait_context.log(f"本次战斗已就绪：battleId={wait_context.battle.battle_id}，turn={wait_context.battle.current_turn}")
         subscription.close()
 
     try:
@@ -129,6 +90,7 @@ async def run(context: AppContext) -> tuple[SendResult, ...]:
         result = await execute_combination(
             context.user_id, context, steps, preserve_current_battle=True
         )
+        battle_control.propagate_script_skip(result)
         if not result.success:
             failure = next(step for step in result.step_results if not step.success)
             raise ScriptExecutionError(

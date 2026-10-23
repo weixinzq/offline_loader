@@ -212,7 +212,7 @@ def parse_login_response(xml_text: str) -> LoginResult:
         return LoginResult(success=False, error_msg=f"XML parse error: {e}")
 
 
-def _save_login_failure(stage, request_url, response, body, error, account, password):
+def _save_login_failure(stage, request_url, response, body, error, account, password, diagnostic_dir=None):
     def redact(text):
         for value in (md5_password(password), urllib.parse.quote_plus(password), password, account):
             if value:
@@ -247,7 +247,7 @@ def _save_login_failure(stage, request_url, response, body, error, account, pass
     else:
         analysis = "角色查询或登录失败，详见错误与响应正文"
     now = datetime.now(timezone.utc)
-    output_dir = Path(os.environ["AOLA_DIAGNOSTIC_DIR"]) if os.environ.get("AOLA_DIAGNOSTIC_DIR") else PROJECT_ROOT / "evidence" / "login-failures"
+    output_dir = Path(diagnostic_dir) if diagnostic_dir is not None else (Path(os.environ["AOLA_DIAGNOSTIC_DIR"]) if os.environ.get("AOLA_DIAGNOSTIC_DIR") else PROJECT_ROOT / "evidence" / "login-failures")
     name = f"{now.strftime('%Y%m%dT%H%M%S%fZ')}-{stage}"
     metadata_path = output_dir / f"{name}.json"
     body_path = output_dir / f"{name}.response.txt"
@@ -289,9 +289,11 @@ async def http_login(
     browser_verification: bool = False,
     timeout: Optional[float] = None,
     proxy_url: Optional[str] = None,
+    network_mode: str = "legacy",
+    diagnostic_dir: Optional[str] = None,
 ) -> LoginResult:
     """Query the configured role and return the selected role's login result."""
-    conf = load_user_config()
+    conf = {} if network_mode == "system" else load_user_config()
     request_timeout = aiohttp.ClientTimeout(
         total=float(timeout if timeout is not None else conf.get("timeout", 30))
     )
@@ -317,8 +319,10 @@ async def http_login(
     response_body = b""
     try:
         from src.network.proxy import process_proxy, proxy_connector
-        effective_proxy = proxy_url or process_proxy()
+        effective_proxy = None if network_mode == "system" else (proxy_url or process_proxy())
         session_options = {"connector": proxy_connector(effective_proxy)} if effective_proxy else {}
+        if network_mode == "system":
+            session_options["trust_env"] = False
         async with aiohttp.ClientSession(**session_options) as session:
             async def post(url, params, name):
                 nonlocal stage, request_url, response, response_body
@@ -351,7 +355,8 @@ async def http_login(
         elif is_captcha_page(response_body.decode("utf-8", errors="replace")):
             result.blocked_reason = "登录需要人机验证"
         result.error_msg = _save_login_failure(
-            stage, request_url, response, response_body, result.error_msg, account, password
+            stage, request_url, response, response_body, result.error_msg, account, password,
+            **({"diagnostic_dir": diagnostic_dir} if diagnostic_dir is not None else {}),
         )
         if browser_verification and is_captcha_page(response_body.decode("utf-8", errors="replace")):
             if effective_proxy:

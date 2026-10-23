@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import json
 import logging
 import tempfile
@@ -139,6 +140,7 @@ class MessageRouter:
         self._subscribers: set[asyncio.Queue[dict]] = set()
         self._observers: set[MessageObserver] = set()
         self._disconnect_observers: set[DisconnectObserver] = set()
+        self.message_filter: Callable[[dict], bool] | None = None
         self._task: asyncio.Task[None] | None = None
         self.disconnected = asyncio.Event()
         self.disconnect_reason = ""
@@ -185,6 +187,8 @@ class MessageRouter:
 
     def publish(self, message: dict) -> None:
         """Publish one decoded message to all current subscribers."""
+        if self.message_filter is not None and self.message_filter(message):
+            return
         cmd = str(message.get("_cmd", ""))
         if cmd in _INITIALIZATION_TRACE_COMMANDS:
             logger.info(
@@ -267,6 +271,32 @@ class BattleLifecycle:
         self.room_id: int | None = None
         self.last_error = ""
         self.entry_responses: set[str] = set()
+        self._abandoned_ids = deque(maxlen=64)
+        self._abandoned_unique_ids = deque(maxlen=64)
+        self._ignore_orphans = False
+
+    def is_stale(self, message: dict) -> bool:
+        if message.get("battleId") is not None and message["battleId"] in self._abandoned_ids:
+            return True
+        if message.get("battleUniqueId") is not None and message["battleUniqueId"] in self._abandoned_unique_ids:
+            return True
+        return self._ignore_orphans and str(message.get("_cmd", "")) in {
+            "2304", "2305", "2401", "2426", "2402", "2403", "2405", "2411", "2423",
+        }
+
+    def abandon(self) -> None:
+        if self.battle_id is not None:
+            self._abandoned_ids.append(self.battle_id)
+        if self.battle_unique_id is not None:
+            self._abandoned_unique_ids.append(self.battle_unique_id)
+        if self._unconfirmed_battle is not None:
+            self._abandoned_ids.append(self._unconfirmed_battle[0])
+            if self._unconfirmed_battle[1] is not None:
+                self._abandoned_unique_ids.append(self._unconfirmed_battle[1])
+        self.finish_without_confirmation()
+        self._unconfirmed_battle = None
+        self.last_error = ""
+        self._ignore_orphans = True
 
     @property
     def entry_ready(self) -> bool:
@@ -322,6 +352,8 @@ class BattleLifecycle:
         self._unconfirmed_battle = None
 
     def observe(self, message: dict) -> None:
+        if self.is_stale(message):
+            return
         cmd = str(message.get("_cmd", ""))
         if self.phase == "idle" and self._unconfirmed_battle is not None and cmd in {
             "2405", "2411", "2402", "2423"
@@ -359,6 +391,7 @@ class BattleLifecycle:
                     self.entry_responses.clear()
                     self.current_turn = None
                 self.battle_epoch += 1
+                self._ignore_orphans = False
                 self.phase = "active"
                 self.battle_id = battle_id
                 self.last_error = ""
@@ -493,6 +526,7 @@ class AppContext:
 
     def __post_init__(self) -> None:
         self.battle = BattleLifecycle()
+        self.messages.message_filter = self.battle.is_stale
         self.auto_battle = AutoBattle(self)
         self.session_clock = SessionClock(self)
         self.messages.add_observer(self._observe_message)

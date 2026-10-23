@@ -1,11 +1,7 @@
-"""Optional lightweight command-line entry point."""
+"""Public HTTP client and Linux service entry point."""
 
-import sys
+from src.interfaces.cli import main
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        from src.cli_jobs import main
-    else:
-        from src.app import main
     main()

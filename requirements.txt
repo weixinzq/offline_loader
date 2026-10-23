@@ -1,6 +1,2 @@
-aiohttp>=3.10
-websockets>=15
-playwright>=1.40
-aiohttp-socks>=0.10
-python-socks[asyncio]>=2.4.3
-PyYAML>=6
+-r requirements.lock
+.

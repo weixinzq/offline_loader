@@ -1,7 +1,10 @@
-"""Packaged entry point for the C# desktop backend."""
+"""Standalone background service entry point."""
 
-from src.ipc.server import main
+import sys
+
+from src.interfaces.cli import main
 
 
 if __name__ == "__main__":
+    sys.argv.insert(1, "serve")
     main()
