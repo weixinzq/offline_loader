@@ -11,5 +11,5 @@ export PYTHONUTF8=1
 unset AOLA_ADMIN_TOKEN
 exec >> "$root/logs/service.log" 2>&1
 exec "$root/.venv/bin/python" -B "$root/backend_main.py" \
-  --host 127.0.0.1 --port 8765 --max-online 500 --login-concurrency 20 \
+  --host 127.0.0.1 --port 8765 --max-online 500 --login-concurrency 44 \
   --data-dir "$root/data/service" --frontend-dir "$root/frontend/dist"

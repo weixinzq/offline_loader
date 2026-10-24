@@ -252,9 +252,18 @@ class RemoteAccountConnection:
         self._online = result["connected"]
         return self._online
 
-    async def probe_server(self, target, timeout, outcome):
-        await self.worker.request("server_probe", self.account_id,
-            {"config": self.spec.config, "target": target, "timeout": timeout}, outcome=outcome)
+    async def probe_server(self, target, timeout, outcome, *, steps=(), attempts=1, log=None):
+        # Probe contexts are temporary, but their initialization/script logs use the same route.
+        self.context = RemoteContext(self)
+        self.context.log_callback = log
+        self.worker.connections[self.account_id] = self
+        try:
+            await self.worker.request("server_probe", self.account_id,
+                {"config": self.spec.config, "target": target, "timeout": timeout,
+                 "steps": list(steps), "attempts": attempts}, outcome=outcome)
+        finally:
+            self.worker.connections.pop(self.account_id, None)
+            self.context = None
 
     def lost(self, reason):
         self._online = False

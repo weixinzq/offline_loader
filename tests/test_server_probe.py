@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import time
 import unittest
@@ -152,6 +153,87 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["flash"]["status"], "authentication_failed")
         self.assertEqual(authenticate.await_count, 1)
 
+    async def test_five_attempt_limit_and_each_reply_is_recorded(self):
+        class Socket(FakeSocket):
+            async def login(inner, *args):
+                inner.login_response = {"_cmd": "logKO", "msg": "maintenance", "sid": inner.session_id}
+                return None
+        outcome = {}
+        with patch("src.network.server_probe.http_login", AsyncMock(return_value=login_result())), \
+             patch("src.network.server_probe.GameSocket", Socket), \
+             patch("src.network.server_probe.asyncio.sleep", AsyncMock()):
+            await probe_server(self.config, target(), .3, outcome, self.redactor, attempts=5)
+        for name in ("flash", "h5"):
+            self.assertEqual(len(outcome[name]["attempts"]), 5)
+            self.assertEqual(outcome[name]["login_response"]["_cmd"], "logKO")
+            self.assertIsNotNone(outcome[name]["connected_at"])
+        self.assertNotIn("fixture-sid", json.dumps(outcome))
+        self.assertFalse(FakeSocket.active)
+
+    async def test_script_waits_for_initialization_and_does_not_retry_after_login(self):
+        events = []
+        calls = 0
+
+        class Socket(FakeSocket):
+            async def login(inner, *args):
+                nonlocal calls
+                calls += 1
+                if calls < 3:
+                    inner.login_response = {"_cmd": "logKO", "msg": "maintenance"}
+                    return None
+                return await super().login(*args)
+
+        class Context:
+            def __init__(inner, config, login, zone, socket, router, **options):
+                inner.socket = socket
+
+            async def wait_for_player_initialization(inner):
+                events.append("initialize")
+
+            async def close(inner):
+                events.append("close")
+                await inner.socket.close()
+
+        async def execute(account, context, steps, result, **options):
+            self.assertEqual(events[-1], "initialize")
+            events.append("execute")
+            self.assertEqual(options["repetitions"], 1)
+            # A script failure must not reconnect and repeat its side effects.
+            result.update(success=False, step_results=[{"error": "fixture script failure"}])
+
+        outcome = {}
+        with patch("src.network.server_probe.http_login", AsyncMock(return_value=login_result())), \
+             patch("src.network.server_probe.GameSocket", Socket), \
+             patch("src.network.server_probe.MessageRouter", return_value=SimpleNamespace(start=lambda: None)), \
+             patch("src.network.server_probe.AppContext", Context), \
+             patch("src.network.server_probe.start_player_initialization"), \
+             patch("src.network.server_probe.run_execution", execute), \
+             patch("src.network.server_probe.asyncio.sleep", AsyncMock()):
+            await probe_server(self.config, target(), .3, outcome, self.redactor, steps=(object(),), attempts=5)
+        self.assertEqual(calls, 4)  # Flash succeeds on third attempt, H5 on first.
+        self.assertEqual(events, ["initialize", "execute", "close"] * 2)
+        self.assertEqual(len(outcome["flash"]["attempts"]), 3)
+        self.assertEqual(len(outcome["h5"]["attempts"]), 1)
+        self.assertEqual(outcome["h5"]["initialization_status"], "succeeded")
+        self.assertEqual(outcome["h5"]["execution"]["status"], "failed")
+        self.assertEqual(outcome["h5"]["login_status"], "succeeded")
+        self.assertIsNotNone(outcome["flash"]["logged_in_at"])
+        self.assertFalse(FakeSocket.active)
+
+    async def test_waf_status_is_returned_without_using_retry_budget(self):
+        result = LoginResult(False, error_msg="WAF TencentCaptcha", blocked_reason="登录需要人机验证",
+                             http_stage="role_query", http_status=403)
+        outcome = {}
+        login = AsyncMock(return_value=result)
+        with patch("src.network.server_probe.http_login", login):
+            await probe_server(self.config, target(), .3, outcome, self.redactor, attempts=5)
+        self.assertEqual(login.await_count, 1)
+        self.assertEqual(outcome["blocked_code"], "verification_required")
+        response = outcome["flash"]["authentication_response"]
+        self.assertEqual(response["http_status"], 403)
+        self.assertEqual(response["http_stage"], "role_query")
+        self.assertEqual(len(outcome["flash"]["attempts"]), 1)
+
 
 class ProbeServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -285,6 +367,37 @@ class ProbeServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ProbeAdapterTests(unittest.TestCase):
+    def test_scheduled_runner_submits_once_at_deadline_and_exports_all_logs(self):
+        from tools.run_server_probe import run
+        clock = datetime.now(timezone.utc)
+        at = clock + timedelta(seconds=2)
+        requests = []
+        record = {"task_id": "fixture-task", "kind": "server_probe", "state": "succeeded", "server_results": []}
+
+        def request(method, path, body=None):
+            requests.append((method, path, clock))
+            if path == "/tasks/validate":
+                return {"valid": True}
+            if "/logs?" in path:
+                return [{"id": 1, "message": "fixture result"}]
+            return record
+
+        def advance(seconds):
+            nonlocal clock
+            clock += timedelta(seconds=seconds)
+
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "probe.json"
+            file.write_text(json.dumps(spec(["fixture-account"]).model_dump(mode="json")))
+            output = Path(directory) / "result"
+            run(file, output, at, request, clock=lambda: clock, sleep=advance)
+            submissions = [r for r in requests if r[:2] == ("POST", "/tasks")]
+            self.assertEqual(len(submissions), 1)
+            self.assertEqual(submissions[0][2], at)
+            self.assertEqual(json.loads((output / "schedule.json").read_text())["state"], "succeeded")
+            self.assertIn("fixture result", (output / "task.log").read_text())
+            self.assertTrue((output / "results.csv").is_file())
+
     def test_http_preserves_probe_fields_and_partial_results(self):
         with tempfile.TemporaryDirectory() as directory:
             application = Application(Path(directory), worker_module="tests.server_probe_worker_fixture")

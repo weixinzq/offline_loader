@@ -116,6 +116,7 @@ class TaskSpec(InputModel):
     steps: list[StepSpec] = Field(default_factory=list)
     server_targets: list[ServerTarget] = Field(default_factory=list, max_length=200)
     probe_timeout: float | None = Field(default=None, gt=0, le=120)
+    probe_attempts: int | None = Field(default=None, ge=1, le=5, strict=True)
     planned_at: datetime | None = None
 
     @model_validator(mode="after")
@@ -124,9 +125,11 @@ class TaskSpec(InputModel):
             raise ValueError("账号 ID 不可重复")
         if self.kind == "execute" and not self.steps:
             raise ValueError("执行任务至少需要一个步骤")
-        if self.kind != "execute" and self.steps:
+        if self.kind not in {"execute", "server_probe"} and self.steps:
             raise ValueError("连接操作不接受执行步骤")
         if self.kind == "server_probe":
+            if self.steps and (len(self.steps) != 1 or self.steps[0].kind != "script"):
+                raise ValueError("服务器测试只允许登录后执行一个脚本一次")
             if not self.server_targets:
                 raise ValueError("服务器测试至少需要一个服务器条目")
             keys = [(s.host, s.flash_port, s.h5_port, s.domain) for s in self.server_targets]

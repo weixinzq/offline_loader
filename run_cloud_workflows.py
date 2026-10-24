@@ -135,9 +135,10 @@ async def preflight(api, manifest, specs, excluded=frozenset(), account_script_o
     # Reconnect preflight also permits an offline session awaiting cleanup; no connection is changed.
     checked = await api.request("POST", "/api/v1/tasks/validate", {
         "kind": "reconnect", "account_ids": [row for spec in specs for row in spec["account_ids"] if row not in excluded], "concurrency": LOGIN_CONCURRENCY})
-    if checked["max_online"] < 300 or checked.get("login_concurrency") != LOGIN_CONCURRENCY:
-        raise ValueError(f"后台需要 --max-online 300 --login-concurrency {LOGIN_CONCURRENCY}，"
+    if checked["max_online"] < 300 or (checked.get("login_concurrency") or 0) < LOGIN_CONCURRENCY:
+        raise ValueError(f"后台需要至少 --max-online 300 --login-concurrency {LOGIN_CONCURRENCY}，"
                          f"实际登录并发为 {checked.get('login_concurrency')}；请检查服务版本和启动参数")
+    return checked
 
 
 async def run_workflows(api, manifest, workflows, *, dry_run=False, reconnect_all=False,
@@ -151,11 +152,12 @@ async def run_workflows(api, manifest, workflows, *, dry_run=False, reconnect_al
         raise ValueError(f"排除账号不在固定映射中：{sorted(excluded - identities)}")
     if excluded == identities:
         raise ValueError("全部300账号均被排除，没有可执行账号")
-    await preflight(api, manifest, specs, excluded, account_script_overrides)
+    capacity = await preflight(api, manifest, specs, excluded, account_script_overrides)
     if dry_run:
         return {"dry_run": True, "accounts": 300 - len(excluded), "excluded_account_ids": sorted(excluded),
                 "account_script_overrides": account_script_overrides,
-                "login_concurrency": LOGIN_CONCURRENCY, "execution_concurrency": 300 - len(excluded),
+                "login_concurrency": LOGIN_CONCURRENCY, "backend_login_concurrency": capacity["login_concurrency"],
+                "execution_concurrency": 300 - len(excluded),
                 "groups": [{"exit": group["exit"], "accounts": sum(row["account_id"] not in excluded for row in group["accounts"]),
                             "repetitions": spec["repetitions"], "steps": len(spec["steps"])}
                            for group, spec in zip(manifest["groups"], specs)]}

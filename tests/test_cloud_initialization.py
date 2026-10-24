@@ -94,6 +94,14 @@ class InitializationWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.backend.factory.calls)
         self.assertFalse(self.backend.tasks.list())
 
+    async def test_backend_with_44_login_slots_accepts_dry_run_without_login(self):
+        self.backend.sessions.login_concurrency = 44
+        result = await self.backend.run(dry_run=True)
+        self.assertEqual(result['backend_login_concurrency'], 44)
+        self.assertEqual(result['login_concurrency'], 20)
+        self.assertFalse(self.backend.factory.calls)
+        self.assertFalse(self.backend.tasks.list())
+
     async def test_blocked_group_cannot_initialize_an_old_session_without_reconnecting(self):
         backend = self.backend
         connected = await backend.tasks.submit(TaskSpec(kind='connect', account_ids=['id-040']))

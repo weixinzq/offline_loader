@@ -65,8 +65,8 @@ class TaskService:
         if spec.kind == "server_probe":
             accounts = accounts[:len(spec.server_targets)]
         steps = ()
-        if spec.kind == "execute":
-            if not spec.steps:
+        if spec.kind in {"execute", "server_probe"}:
+            if spec.kind == "execute" and not spec.steps:
                 raise ServiceError("invalid_steps", "执行任务至少需要一个步骤")
             for step in spec.steps:
                 if step.kind == "messages":
@@ -85,7 +85,7 @@ class TaskService:
             result["server_assignments"] = self._server_rows(spec, accounts)
             result["effective_concurrency"] = min(spec.concurrency, self.sessions.login_concurrency,
                 capacity["required_capacity"], len(accounts))
-            result["max_transport_attempts"] = sum(int(target.flash_port > 0) +
+            result["max_transport_attempts"] = (spec.probe_attempts or 1) * sum(int(target.flash_port > 0) +
                 int(target.h5_port > 0 and bool(target.domain)) for target in spec.server_targets)
         return result
 
@@ -326,16 +326,23 @@ class TaskService:
                         row["exit_ip"] = profile["exit_ip"]
                         account_row["network_write"] = {"status": "unknown", "count": None}
                         await self.sessions.probe_server(run.record["task_id"], account, row["server"],
-                                                         run.spec.probe_timeout or 15, outcome)
+                                                         run.spec.probe_timeout or 15, outcome,
+                                                         steps=[step.model_dump() for step in run.spec.steps],
+                                                         attempts=run.spec.probe_attempts or 1)
                         if outcome.get("blocked_code"):
                             raise ServiceError(outcome["blocked_code"], "登录受到限制，停止本轮测试")
                         statuses = [outcome[name]["status"] for name in ("flash", "h5")]
                         row["state"] = "succeeded" if all(s in {"available", "not_supported"} for s in statuses) else "failed"
+                        if any(outcome[name].get("execution", {}).get("success") is False
+                               or outcome[name].get("initialization_status") in {"failed", "timeout"}
+                               for name in ("flash", "h5")):
+                            row["state"] = "failed"
                         if all(s == "not_supported" for s in statuses):
                             row["state"] = "skipped"
                         if row["state"] == "failed":
                             failed = next(outcome[name] for name in ("flash", "h5")
-                                          if outcome[name]["status"] not in {"available", "not_supported"})
+                                          if outcome[name]["status"] not in {"available", "not_supported"}
+                                          or outcome[name].get("error"))
                             row["error"] = {"code": failed["status"], "message": failed["error"] or "未完成游戏登录测试"}
                             account_row["error"] = row["error"]
                     except asyncio.CancelledError:

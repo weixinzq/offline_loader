@@ -4881,6 +4881,19 @@
             ],
             "title": "Probe Timeout"
           },
+          "probe_attempts": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 5.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Probe Attempts"
+          },
           "planned_at": {
             "anyOf": [
               {
@@ -4967,6 +4980,67 @@
             "type": "string",
             "title": "Login Status",
             "default": "not_attempted"
+          },
+          "connected_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connected At"
+          },
+          "logged_in_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logged In At"
+          },
+          "authentication_response": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Authentication Response"
+          },
+          "login_response": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Login Response"
+          },
+          "initialization_status": {
+            "type": "string",
+            "title": "Initialization Status",
+            "default": "not_attempted"
+          },
+          "initialized_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Initialized At"
+          },
+          "execution": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Execution"
+          },
+          "attempts": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Attempts"
           },
           "server_index": {
             "anyOf": [

@@ -153,6 +153,14 @@ class TransportProbeResult(BaseModel):
     stage_durations_ms: dict[str, float] = Field(default_factory=dict)
     connection_status: str = "not_attempted"
     login_status: str = "not_attempted"
+    connected_at: str | None = None
+    logged_in_at: str | None = None
+    authentication_response: dict[str, Any] = Field(default_factory=dict)
+    login_response: dict[str, Any] = Field(default_factory=dict)
+    initialization_status: str = "not_attempted"
+    initialized_at: str | None = None
+    execution: dict[str, Any] = Field(default_factory=dict)
+    attempts: list[dict[str, Any]] = Field(default_factory=list)
     server_index: int | None = None
     zone_index: int | None = None
     zone_name: str | None = None

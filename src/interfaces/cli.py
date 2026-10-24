@@ -277,7 +277,9 @@ def server_probe_csv(record):
                "flash_port", "h5_port", "domain", "source_server_index", "account_id", "egress_group_id",
                "exit_ip", "transport", "status", "stage", "server_index", "zone_index", "zone_name",
                "started_at", "finished_at", "duration_ms", "authenticate_ms", "connect_ms", "login_ms",
-               "connection_status", "login_status", "error"]
+               "connection_status", "login_status", "connected_at", "logged_in_at", "initialized_at",
+               "initialization_status", "initialize_ms", "execute_ms", "authentication_response",
+               "login_response", "execution", "attempts", "error"]
     writer = csv.DictWriter(stream, fieldnames=columns)
     writer.writeheader()
     for server in record.get("server_results", []):
@@ -290,7 +292,9 @@ def server_probe_csv(record):
                        batch_started_at=record.get("started_at"), batch_finished_at=record.get("finished_at"),
                        source_server_index=server["server"].get("server_index"), transport=transport)
             row.update({name + "_ms": result.get("stage_durations_ms", {}).get(name)
-                        for name in ("authenticate", "connect", "login")})
+                        for name in ("authenticate", "connect", "login", "initialize", "execute")})
+            for name in ("authentication_response", "login_response", "execution", "attempts"):
+                row[name] = json.dumps(result.get(name), ensure_ascii=False)
             if server.get("error"):
                 row["error"] = result.get("error") or server["error"]["message"]
             writer.writerow(row)

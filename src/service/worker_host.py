@@ -74,7 +74,9 @@ class WorkerHost:
             config = dict(data["config"], network_mode="system", browser_verification=False)
             self.redactor.collect(config)
             try:
-                await probe_server(config, data["target"], data["timeout"], outcome, self.redactor)
+                steps = self.registry.build_steps(TypeAdapter(list[StepSpec]).validate_python(data.get("steps", [])))
+                await probe_server(config, data["target"], data["timeout"], outcome, self.redactor,
+                                   steps=steps, attempts=data.get("attempts", 1), log=self.log)
                 return outcome
             finally:
                 self.probing.discard(account_id)

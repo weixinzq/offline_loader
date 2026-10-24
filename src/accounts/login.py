@@ -65,6 +65,8 @@ class LoginResult:
     error_msg: str = ""
     blocked_reason: str = ""
     server_list: list[ServerEndpoint] = field(default_factory=list)
+    http_stage: str = ""
+    http_status: int | None = None
 
 
 class LoginBlockedError(ConnectionError):
@@ -369,6 +371,8 @@ async def http_login(
         result = LoginResult(success=False, error_msg=f"Proxy error: {e}")
     except asyncio.TimeoutError:
         result = LoginResult(success=False, error_msg="Login request timed out")
+    result.http_stage = stage
+    result.http_status = response.status if response is not None else None
     if not result.success:
         status = response.status if response is not None else None
         if status in (403, 429):

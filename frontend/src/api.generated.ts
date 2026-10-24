@@ -907,6 +907,8 @@ export interface components {
             server_targets?: components["schemas"]["ServerTarget"][];
             /** Probe Timeout */
             probe_timeout?: number | null;
+            /** Probe Attempts */
+            probe_attempts?: number | null;
             /** Planned At */
             planned_at?: string | null;
         };
@@ -936,6 +938,33 @@ export interface components {
              * @default not_attempted
              */
             login_status: string;
+            /** Connected At */
+            connected_at?: string | null;
+            /** Logged In At */
+            logged_in_at?: string | null;
+            /** Authentication Response */
+            authentication_response?: {
+                [key: string]: unknown;
+            };
+            /** Login Response */
+            login_response?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Initialization Status
+             * @default not_attempted
+             */
+            initialization_status: string;
+            /** Initialized At */
+            initialized_at?: string | null;
+            /** Execution */
+            execution?: {
+                [key: string]: unknown;
+            };
+            /** Attempts */
+            attempts?: {
+                [key: string]: unknown;
+            }[];
             /** Server Index */
             server_index?: number | null;
             /** Zone Index */

@@ -47,7 +47,20 @@ Linux 在项目虚拟环境中使用 `aola --json servers probe --file probe.jso
 
 `--at` 必须包含时区，已过去的时间会报错。命令行在本机等待到点后提交后台，等待期间必须保持进程运行；提交前中断命令行不会启动任务。该参数不会在后台创建持久定时任务。返回任务 ID 后，退出命令行不会取消后台任务。
 
-每轮先在所用 worker 中检测出口 IP，再并发进行测试。每种受支持传输分别获取新 SID；Flash 测试完全断开后才测试 H5。认证、连接、登录响应各自受 `probe_timeout` 秒限制，断开清理使用同样的超时、至少保留 1 秒。测试不执行玩家初始化、脚本或战斗操作。
+每轮先在所用 worker 中检测出口 IP，再并发进行测试。每种受支持传输分别获取新 SID；Flash 测试完全断开后才测试 H5。认证、连接、登录响应各自受 `probe_timeout` 秒限制，断开清理使用同样的超时、至少保留 1 秒。默认仅测试登录，不执行玩家初始化或脚本。
+
+需要登录后执行脚本时，在配置中加入 `"steps": [{"kind": "script", "script_id": "mt250816_1"}]`。每种传输登录成功后，使用与 `Com/load_second.py` 相同的玩家初始化流程，再执行该脚本一次；本脚本会提交“四象一”的保留选择。`probe_attempts` 可设置为 1–5，默认 1；普通登录失败在清理完成后等待 0.5 秒再重试，协议登录成功后不再重连，即使后续初始化或脚本失败。验证码、WAF 阻断和限流仍停止本轮剩余登录。
+
+结果增加 `connected_at`、`logged_in_at`、`initialized_at`、脱敏 `authentication_response` / `login_response`、`execution` 及每次重试的 `attempts`。认证失败诊断文件仍保存响应正文和 HTTP 状态；账号密码、SID、令牌不会导出。CSV 也包含这些字段。
+
+在 Linux 后台保留一份计划、预检、逐条日志和最终 JSON/CSV：
+
+```bash
+.venv/bin/python -u -m tools.run_server_probe --file probe-scheduled.json \
+  --at "2026-10-25T05:58:51+08:00" --output logs/server-probe-20261025-055851
+```
+
+该命令运行期间等待到点提交，提交后持续保存结果；退出进程会失去等待或后续日志导出。可由现有服务器进程管理器托管，避免依赖 SSH 会话。配置中的账号代理分组决定实际通道；每通道 5 个账号需预先分配账号，不能只降低 `concurrency`。
 
 `planned_at`、后台 `started_at/finished_at`、各服务器及各传输的时间均保存在记录中。响应时间含排队、认证和清理，不能视为所有服务器在同一毫秒接受测试。各阶段耗时位于 `stage_durations_ms`。
 
