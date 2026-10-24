@@ -18,12 +18,14 @@ from src.service.execution import MessageService, ScriptRegistry
 from src.service.execution_runner import run_execution
 from src.service.runtime import Redactor
 from src.service.worker_process import actual_executable, bind_linux_parent
+from src.network.server_probe import probe_server
 
 
 class WorkerHost:
     def __init__(self, connection_factory=AccountConnection):
         self.factory = connection_factory
         self.connections = {}
+        self.probing = set()
         self.commands = {}
         self.registry = ScriptRegistry(MessageService())
         self.redactor = Redactor(None)
@@ -65,8 +67,19 @@ class WorkerHost:
             await asyncio.gather(*pending, return_exceptions=True)
             await asyncio.gather(*(connection.disconnect() for connection in self.connections.values()))
             return {}
+        if operation == "server_probe":
+            if account_id in self.connections or account_id in self.probing:
+                raise ServiceError("worker_account_busy", "账号已经存在于执行进程", 409)
+            self.probing.add(account_id)
+            config = dict(data["config"], network_mode="system", browser_verification=False)
+            self.redactor.collect(config)
+            try:
+                await probe_server(config, data["target"], data["timeout"], outcome, self.redactor)
+                return outcome
+            finally:
+                self.probing.discard(account_id)
         if operation == "connect":
-            if account_id in self.connections:
+            if account_id in self.connections or account_id in self.probing:
                 raise ServiceError("worker_account_busy", "账号已经存在于执行进程", 409)
             config = data["config"]
             self.redactor.collect(config)

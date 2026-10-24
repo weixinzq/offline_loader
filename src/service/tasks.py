@@ -10,6 +10,7 @@ from src.scripting.composer import execute_combination
 from src.service.contracts import ServiceError, TaskSpec
 from src.service.runtime import Redactor
 from src.service.execution_runner import run_execution
+from src.network.server_probe import transport_result
 
 
 _TERMINAL = frozenset({"succeeded", "failed", "cancelled", "interrupted", "skipped"})
@@ -40,6 +41,7 @@ class _Run:
     stop_reason: str | None = None
     workers: set[asyncio.Task] = field(default_factory=set)
     group_semaphores: dict = field(default_factory=dict)
+    egress_profiles: dict = field(default_factory=dict)
 
 
 class TaskService:
@@ -60,6 +62,8 @@ class TaskService:
         if not spec.account_ids or len(set(spec.account_ids)) != len(spec.account_ids):
             raise ServiceError("invalid_accounts", "请选择不重复的目标账号")
         accounts = [self.store.get_account(account_id, private=True) for account_id in spec.account_ids]
+        if spec.kind == "server_probe":
+            accounts = accounts[:len(spec.server_targets)]
         steps = ()
         if spec.kind == "execute":
             if not spec.steps:
@@ -75,8 +79,24 @@ class TaskService:
     def validate(self, spec) -> dict:
         spec, accounts, steps = self._prepare(spec)
         capacity = self.sessions.check(spec, accounts)
-        return {"valid": True, "account_count": len(accounts), "step_count": len(steps),
-                "spec": _snapshot(spec), **capacity}
+        result = {"valid": True, "account_count": len(accounts), "step_count": len(steps),
+                  "spec": _snapshot(spec), **capacity}
+        if spec.kind == "server_probe":
+            result["server_assignments"] = self._server_rows(spec, accounts)
+            result["effective_concurrency"] = min(spec.concurrency, self.sessions.login_concurrency,
+                capacity["required_capacity"], len(accounts))
+            result["max_transport_attempts"] = sum(int(target.flash_port > 0) +
+                int(target.h5_port > 0 and bool(target.domain)) for target in spec.server_targets)
+        return result
+
+    @staticmethod
+    def _server_rows(spec, accounts):
+        return [{"target_index": index, "server": target.model_dump(),
+                 "account_id": accounts[index % len(accounts)]["account_id"],
+                 "egress_group_id": accounts[index % len(accounts)]["egress_group_id"],
+                 "exit_ip": None, "state": "queued", "started_at": None, "finished_at": None,
+                 "error": None, "flash": transport_result(), "h5": transport_result()}
+                for index, target in enumerate(spec.server_targets)]
 
     def _publish(self, run: _Run) -> None:
         self.store.save_task(run.record)
@@ -111,6 +131,8 @@ class TaskService:
                 for account in accounts
             ],
         }
+        if spec.kind == "server_probe":
+            record["server_results"] = self._server_rows(spec, accounts)
         run = _Run(spec, [account for account in accounts if account["account_id"] not in skipped], steps, record,
                    Redactor(self.store, accounts, spec.model_dump(mode="json")))
         self._runs[task_id] = run
@@ -133,8 +155,11 @@ class TaskService:
 
     def results(self, task_id: str) -> dict:
         task = self.get(task_id)
-        return {"task_id": task_id, "state": task["state"], "error": task.get("error"),
-                "account_results": task["account_results"]}
+        result = {"task_id": task_id, "state": task["state"], "error": task.get("error"),
+                  "account_results": task["account_results"]}
+        if task.get("kind") == "server_probe":
+            result["server_results"] = task.get("server_results", [])
+        return result
 
     def logs(self, task_id: str, after=0, limit=200):
         self.get(task_id)
@@ -276,6 +301,66 @@ class TaskService:
         finally:
             self._publish(run)
 
+    async def _probe_exit(self, run, group):
+        try:
+            run.egress_profiles[group] = await self.sessions.egress.probe(group)
+        except Exception as error:
+            run.egress_profiles[group] = {"error": {"code": "egress_probe_failed",
+                                                    "message": run.redactor.clean(error)}}
+
+    async def _probe_account(self, run, account, account_row, semaphore):
+        rows = [row for row in run.record["server_results"] if row["account_id"] == account["account_id"]]
+        account_row["state"] = "running"
+        try:
+            for row in rows:
+                async with semaphore, run.group_semaphores[account["egress_group_id"]]:
+                    if run.stop_reason:
+                        break
+                    row.update(state="running", started_at=_now())
+                    self._publish(run)
+                    outcome = {}
+                    try:
+                        profile = run.egress_profiles[account["egress_group_id"]]
+                        if profile.get("error"):
+                            raise ServiceError(**profile["error"])
+                        row["exit_ip"] = profile["exit_ip"]
+                        account_row["network_write"] = {"status": "unknown", "count": None}
+                        await self.sessions.probe_server(run.record["task_id"], account, row["server"],
+                                                         run.spec.probe_timeout or 15, outcome)
+                        if outcome.get("blocked_code"):
+                            raise ServiceError(outcome["blocked_code"], "登录受到限制，停止本轮测试")
+                        statuses = [outcome[name]["status"] for name in ("flash", "h5")]
+                        row["state"] = "succeeded" if all(s in {"available", "not_supported"} for s in statuses) else "failed"
+                        if all(s == "not_supported" for s in statuses):
+                            row["state"] = "skipped"
+                        if row["state"] == "failed":
+                            failed = next(outcome[name] for name in ("flash", "h5")
+                                          if outcome[name]["status"] not in {"available", "not_supported"})
+                            row["error"] = {"code": failed["status"], "message": failed["error"] or "未完成游戏登录测试"}
+                            account_row["error"] = row["error"]
+                    except asyncio.CancelledError:
+                        row["state"] = "cancelled"
+                        raise
+                    except Exception as error:
+                        row.update(state="failed", error={"code": getattr(error, "code", "probe_failed"),
+                                                           "message": run.redactor.clean(error)})
+                        self._error(run, account_row, error)
+                    finally:
+                        for name in ("flash", "h5"):
+                            if name in outcome:
+                                row[name] = outcome[name]
+                        row["finished_at"] = _now()
+                        self._log(run.record["task_id"], account["account_id"],
+                                  f"服务器 {row['target_index']}：Flash={row['flash']['status']} H5={row['h5']['status']}")
+                        self._publish(run)
+            if account_row["state"] != "failed":
+                account_row["state"] = "succeeded" if all(r["state"] in {"succeeded", "skipped"} for r in rows) else "failed"
+        except asyncio.CancelledError:
+            account_row["state"] = "cancelled"
+            raise
+        finally:
+            self._publish(run)
+
     async def _run(self, run: _Run) -> None:
         run.started = True
         try:
@@ -288,6 +373,11 @@ class TaskService:
                                     for group, limit in self.sessions.execution_limits(run.accounts).items()}
             all_online = (run.spec.kind == "execute" and run.spec.session_policy == "temporary"
                           and run.spec.mode == "all_online")
+            if run.spec.kind == "server_probe":
+                await self._gather(run, (self._probe_exit(run, group) for group in run.group_semaphores))
+                await self._gather(run, (self._probe_account(run, account, row, semaphore)
+                    for account, row in zip(run.accounts, run.record["account_results"])))
+                return
             await self._gather(run, (
                 self._one(run, account, row, semaphore, prepare_only=all_online)
                 for account, row in zip(run.accounts,
@@ -320,6 +410,12 @@ class TaskService:
             self._publish(run)
             return
         self.sessions.release(task_id)
+        for row in run.record.get("server_results", []):
+            if row["state"] not in _TERMINAL:
+                row["state"] = "interrupted" if run.stop_reason == "interrupted" else "cancelled" if run.stop_reason == "cancelled" else "skipped"
+            for name in ("flash", "h5"):
+                if row[name]["status"] in {"not_tested", "running"}:
+                    row[name]["status"] = "interrupted" if run.stop_reason == "interrupted" else "cancelled" if run.stop_reason == "cancelled" else "not_tested"
         for row in run.record["account_results"]:
             if row["state"] not in _TERMINAL:
                 row["state"] = "interrupted" if run.stop_reason == "interrupted" else "cancelled"

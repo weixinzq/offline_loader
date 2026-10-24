@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal
+from datetime import datetime
+from ipaddress import IPv4Address
+import re
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ServiceError(ValueError):
@@ -80,8 +83,29 @@ class ScriptStepSpec(InputModel):
 StepSpec = Annotated[MessagesStep | ScriptStepSpec, Field(discriminator="kind")]
 
 
+class ServerTarget(InputModel):
+    host: str
+    flash_port: int = Field(ge=0, le=65535, strict=True)
+    h5_port: int = Field(ge=0, le=65535, strict=True)
+    domain: str = Field(default="", max_length=253)
+    server_index: int | None = Field(default=None, ge=0, strict=True)
+
+    @field_validator("host")
+    @classmethod
+    def valid_host(cls, value):
+        return str(IPv4Address(value))
+
+    @field_validator("domain")
+    @classmethod
+    def valid_domain(cls, value):
+        value = value.lower().rstrip(".")
+        if value and not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", value):
+            raise ValueError("H5 域名不能包含 URL、端口或路径")
+        return value
+
+
 class TaskSpec(InputModel):
-    kind: Literal["connect", "reconnect", "disconnect", "execute"] = "execute"
+    kind: Literal["connect", "reconnect", "disconnect", "execute", "server_probe"] = "execute"
     account_ids: list[str] = Field(min_length=1)
     session_policy: Literal["existing", "temporary"] = "temporary"
     mode: Literal["bounded", "all_online"] = "bounded"
@@ -90,6 +114,9 @@ class TaskSpec(InputModel):
     repeat_interval: float = Field(default=0.5, ge=0)
     message_delay: float = Field(default=0.2, ge=0)
     steps: list[StepSpec] = Field(default_factory=list)
+    server_targets: list[ServerTarget] = Field(default_factory=list, max_length=200)
+    probe_timeout: float | None = Field(default=None, gt=0, le=120)
+    planned_at: datetime | None = None
 
     @model_validator(mode="after")
     def validate_task(self):
@@ -99,4 +126,16 @@ class TaskSpec(InputModel):
             raise ValueError("执行任务至少需要一个步骤")
         if self.kind != "execute" and self.steps:
             raise ValueError("连接操作不接受执行步骤")
+        if self.kind == "server_probe":
+            if not self.server_targets:
+                raise ValueError("服务器测试至少需要一个服务器条目")
+            keys = [(s.host, s.flash_port, s.h5_port, s.domain) for s in self.server_targets]
+            if len(keys) != len(set(keys)):
+                raise ValueError("服务器条目不可重复")
+            if self.session_policy != "temporary" or self.mode != "bounded" or self.repetitions != 1:
+                raise ValueError("服务器测试只支持 temporary/bounded，且只能测试一轮")
+        elif self.server_targets or self.planned_at is not None:
+            raise ValueError("服务器条目和计划时间仅用于 server_probe")
+        if self.planned_at is not None and self.planned_at.utcoffset() is None:
+            raise ValueError("计划时间必须包含时区")
         return self

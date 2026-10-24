@@ -3,7 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from src.service.contracts import MessageSpec
+from src.service.contracts import MessageSpec, ServerTarget
 
 
 class ErrorInfo(BaseModel):
@@ -101,6 +101,9 @@ class TaskPreflight(BaseModel):
     max_online: int
     login_concurrency: int
     skipped_accounts: list[SkippedAccount] = Field(default_factory=list)
+    server_assignments: list[dict[str, Any]] = Field(default_factory=list)
+    effective_concurrency: int | None = None
+    max_transport_attempts: int | None = None
 
 
 class NetworkWrite(BaseModel):
@@ -141,15 +144,45 @@ class AccountResult(BaseModel):
 TaskState = Literal["queued", "running", "cancelling", "succeeded", "failed", "cancelled", "interrupted"]
 
 
+class TransportProbeResult(BaseModel):
+    status: str
+    stage: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_ms: float | None = None
+    stage_durations_ms: dict[str, float] = Field(default_factory=dict)
+    connection_status: str = "not_attempted"
+    login_status: str = "not_attempted"
+    server_index: int | None = None
+    zone_index: int | None = None
+    zone_name: str | None = None
+    error: str | None = None
+
+
+class ServerProbeResult(BaseModel):
+    target_index: int
+    server: ServerTarget
+    account_id: str
+    egress_group_id: str
+    exit_ip: str | None = None
+    state: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    error: ErrorInfo | None = None
+    flash: TransportProbeResult
+    h5: TransportProbeResult
+
+
 class TaskResults(BaseModel):
     task_id: str
     state: TaskState
     error: ErrorInfo | None
     account_results: list[AccountResult]
+    server_results: list[ServerProbeResult] = Field(default_factory=list)
 
 
 class TaskRecord(TaskResults):
-    kind: Literal["connect", "reconnect", "disconnect", "execute"]
+    kind: Literal["connect", "reconnect", "disconnect", "execute", "server_probe"]
     created_at: str
     updated_at: str | None = None
     started_at: str | None

@@ -4242,6 +4242,135 @@
         ],
         "title": "ScriptStepSpec"
       },
+      "ServerProbeResult": {
+        "properties": {
+          "target_index": {
+            "type": "integer",
+            "title": "Target Index"
+          },
+          "server": {
+            "$ref": "#/components/schemas/ServerTarget"
+          },
+          "account_id": {
+            "type": "string",
+            "title": "Account Id"
+          },
+          "egress_group_id": {
+            "type": "string",
+            "title": "Egress Group Id"
+          },
+          "exit_ip": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Ip"
+          },
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "flash": {
+            "$ref": "#/components/schemas/TransportProbeResult"
+          },
+          "h5": {
+            "$ref": "#/components/schemas/TransportProbeResult"
+          }
+        },
+        "type": "object",
+        "required": [
+          "target_index",
+          "server",
+          "account_id",
+          "egress_group_id",
+          "state",
+          "flash",
+          "h5"
+        ],
+        "title": "ServerProbeResult"
+      },
+      "ServerTarget": {
+        "properties": {
+          "host": {
+            "type": "string",
+            "title": "Host"
+          },
+          "flash_port": {
+            "type": "integer",
+            "maximum": 65535.0,
+            "minimum": 0.0,
+            "title": "Flash Port"
+          },
+          "h5_port": {
+            "type": "integer",
+            "maximum": 65535.0,
+            "minimum": 0.0,
+            "title": "H5 Port"
+          },
+          "domain": {
+            "type": "string",
+            "maxLength": 253,
+            "title": "Domain",
+            "default": ""
+          },
+          "server_index": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Index"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "host",
+          "flash_port",
+          "h5_port"
+        ],
+        "title": "ServerTarget"
+      },
       "SessionInput": {
         "properties": {
           "account_ids": {
@@ -4437,6 +4566,36 @@
             },
             "type": "array",
             "title": "Skipped Accounts"
+          },
+          "server_assignments": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Server Assignments"
+          },
+          "effective_concurrency": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Concurrency"
+          },
+          "max_transport_attempts": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Transport Attempts"
           }
         },
         "type": "object",
@@ -4487,13 +4646,21 @@
             "type": "array",
             "title": "Account Results"
           },
+          "server_results": {
+            "items": {
+              "$ref": "#/components/schemas/ServerProbeResult"
+            },
+            "type": "array",
+            "title": "Server Results"
+          },
           "kind": {
             "type": "string",
             "enum": [
               "connect",
               "reconnect",
               "disconnect",
-              "execute"
+              "execute",
+              "server_probe"
             ],
             "title": "Kind"
           },
@@ -4589,6 +4756,13 @@
             },
             "type": "array",
             "title": "Account Results"
+          },
+          "server_results": {
+            "items": {
+              "$ref": "#/components/schemas/ServerProbeResult"
+            },
+            "type": "array",
+            "title": "Server Results"
           }
         },
         "type": "object",
@@ -4608,7 +4782,8 @@
               "connect",
               "reconnect",
               "disconnect",
-              "execute"
+              "execute",
+              "server_probe"
             ],
             "title": "Kind",
             "default": "execute"
@@ -4684,6 +4859,39 @@
             },
             "type": "array",
             "title": "Steps"
+          },
+          "server_targets": {
+            "items": {
+              "$ref": "#/components/schemas/ServerTarget"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "title": "Server Targets"
+          },
+          "probe_timeout": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 120.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Probe Timeout"
+          },
+          "planned_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planned At"
           }
         },
         "additionalProperties": false,
@@ -4692,6 +4900,124 @@
           "account_ids"
         ],
         "title": "TaskSpec"
+      },
+      "TransportProbeResult": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "stage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stage"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "duration_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Ms"
+          },
+          "stage_durations_ms": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Stage Durations Ms"
+          },
+          "connection_status": {
+            "type": "string",
+            "title": "Connection Status",
+            "default": "not_attempted"
+          },
+          "login_status": {
+            "type": "string",
+            "title": "Login Status",
+            "default": "not_attempted"
+          },
+          "server_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Index"
+          },
+          "zone_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Zone Index"
+          },
+          "zone_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Zone Name"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "TransportProbeResult"
       },
       "ValidateMessagesInput": {
         "properties": {

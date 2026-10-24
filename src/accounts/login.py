@@ -20,6 +20,28 @@ from src.accounts.browser_login import browser_login, is_captcha_page
 from src.config import PROJECT_ROOT, load_user_config, default_config
 
 @dataclass
+class ServerEndpoint:
+    server_index: int
+    host: str
+    flash_port: int
+    h5_port: int
+    domain: str = ""
+
+
+def parse_server_list(text: str) -> list[ServerEndpoint]:
+    servers = []
+    for index, entry in enumerate(text.split(";")):
+        parts = entry.strip().split(":")
+        if len(parts) != 4:
+            continue
+        try:
+            servers.append(ServerEndpoint(index, parts[0], int(parts[1]), int(parts[2]), parts[3]))
+        except ValueError:
+            continue
+    return servers
+
+
+@dataclass
 class ZoneData:
     zone_index: int
     zone_name: str
@@ -30,6 +52,7 @@ class ZoneData:
     is_new: bool = False
     is_hot: bool = False
     domain: str = ""
+    server_index: int = -1
 
 
 @dataclass
@@ -41,6 +64,7 @@ class LoginResult:
     zone_list: list[ZoneData] = field(default_factory=list)
     error_msg: str = ""
     blocked_reason: str = ""
+    server_list: list[ServerEndpoint] = field(default_factory=list)
 
 
 class LoginBlockedError(ConnectionError):
@@ -162,7 +186,8 @@ def parse_login_response(xml_text: str) -> LoginResult:
         svr_text = _get_element_text(root, "svr")
         zn_text = _get_element_text(root, "zn")
 
-        server_list = [s for s in svr_text.split(";") if s.strip()]
+        server_list = parse_server_list(svr_text)
+        servers_by_index = {server.server_index: server for server in server_list}
         zone_info_list = [z for z in zn_text.split(";") if z.strip()]
 
         zone_list = []
@@ -173,16 +198,10 @@ def parse_login_response(xml_text: str) -> LoginResult:
             zone_names = parts[0].split(" ")
             zone_index = int(zone_names[0])
             server_idx = int(parts[1])
-            if server_idx >= len(server_list):
+            if server_idx not in servers_by_index:
                 continue
-            server = server_list[server_idx]
-            server_parts = server.split(":")
-            if len(server_parts) < 4:
-                continue
-            host = server_parts[0]
-            flash_port = int(server_parts[1])
-            h5_port = int(server_parts[2])
-            domain = server_parts[3]
+            server = servers_by_index[server_idx]
+            host, flash_port, h5_port, domain = server.host, server.flash_port, server.h5_port, server.domain
             if flash_port <= 0 and h5_port <= 0:
                 continue
             if zone_index >= 100000:
@@ -197,6 +216,7 @@ def parse_login_response(xml_text: str) -> LoginResult:
                 is_new=parts[3] == "1" if len(parts) > 3 else False,
                 is_hot=parts[4] == "1" if len(parts) > 4 else False,
                 domain=domain,
+                server_index=server_idx,
             ))
 
         zone_list.sort(key=lambda z: z.user_num)
@@ -207,6 +227,7 @@ def parse_login_response(xml_text: str) -> LoginResult:
             duoduo_id=duoduo_id,
             session_id=session_id,
             zone_list=zone_list,
+            server_list=server_list,
         )
     except ET.ParseError as e:
         return LoginResult(success=False, error_msg=f"XML parse error: {e}")

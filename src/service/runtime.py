@@ -143,13 +143,13 @@ class SessionService:
     def _group_needs(self, spec, accounts):
         counts = {}
         for account in accounts:
-            needs = spec.kind == "execute" and spec.session_policy == "temporary"
+            needs = spec.kind == "server_probe" or spec.kind == "execute" and spec.session_policy == "temporary"
             if spec.kind in {"connect", "reconnect"}:
                 needs = not any(session.slot and session.account_id == account["account_id"] for session in self._sessions.values())
             if needs:
                 group_id = account.get("egress_group_id")
                 counts[group_id] = counts.get(group_id, 0) + 1
-        if spec.kind == "execute" and spec.mode == "bounded":
+        if spec.kind in {"execute", "server_probe"} and spec.mode == "bounded":
             limits = self.execution_limits(accounts)
             counts = {group: min(count, spec.concurrency, limits[group]) for group, count in counts.items()}
         return counts
@@ -180,6 +180,8 @@ class SessionService:
                     continue
             eligible.append(account)
             group_id = account.get("egress_group_id")
+            if spec.kind == "server_probe" and not group_id:
+                raise ServiceError("egress_required", "服务器测试账号必须属于已确认的代理出口分组", 409)
             if group_id and spec.kind != "disconnect":
                 self.egress.check(group_id, connecting=True)
             if identity in self._claims:
@@ -190,6 +192,8 @@ class SessionService:
                 raise ServiceError("session_conflict", "同一登录账号已有其他配置的会话", 409)
             if existing is not None and existing.state == "disconnecting" and spec.kind != "disconnect":
                 raise ServiceError("session_conflict", "会话正在清理，请等待断开完成", 409)
+            if spec.kind == "server_probe" and existing is not None:
+                raise ServiceError("session_conflict", "服务器测试只能使用离线账号", 409)
             if spec.kind == "execute":
                 if spec.session_policy == "temporary" and existing is not None:
                     raise ServiceError("session_conflict", "临时任务不能借用已存在的会话", 409)
@@ -209,7 +213,7 @@ class SessionService:
                 if usage["online_count"] + usage["reserved_count"] + count > group["max_online"]:
                     raise ServiceError("egress_capacity_exceeded", f"出口分组“{group['name']}”在线及预留连接不能超过 {group['max_online']} 个", 409)
         needed = sum(group_needs.values())
-        if spec.kind == "execute" and spec.mode == "bounded":
+        if spec.kind in {"execute", "server_probe"} and spec.mode == "bounded":
             needed = min(needed, spec.concurrency)
         used = sum(item.slot for item in self._sessions.values()) + sum(self._reservations.values())
         if used + needed > self.max_online:
@@ -265,6 +269,22 @@ class SessionService:
         except Exception as exc:
             session.error = session.redactor.clean(exc)
             self._publish(session)
+
+    async def probe_server(self, task_id, account, target, timeout, outcome):
+        if self._claims.get(account_identity(account)) != task_id or not account.get("egress_group_id"):
+            raise ServiceError("account_busy", "探测任务没有代理测试账号的独占权", 409)
+        self.egress.check(account["egress_group_id"], connecting=True)
+        config = dict(account)
+        config.pop("account_id", None)
+        config.pop("proxy_url", None)
+        config.update(network_mode="system", browser_verification=False,
+                      use_environment_proxy=False, read_user_config=False,
+                      service_account_id=account["account_id"],
+                      diagnostic_dir=str(self.store.directory / "login-failures"))
+        connection = self.connection_factory(AccountSpec(account.get("label", account["account_id"]), config))
+        # Reservations remain held until the worker acknowledges cleanup, including cancellation.
+        async with self._login_slots:
+            await connection.probe_server(target, timeout, outcome)
 
     async def connect(self, task_id: str, account: dict, *, temporary: bool, reconnect=False):
         # All batches and child processes share this login/initialization limit.

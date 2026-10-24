@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import io
 import json
 import os
 from pathlib import Path
@@ -19,8 +22,10 @@ tasks_app = typer.Typer(no_args_is_help=True, help="Validate and manage backgrou
 scripts_app = typer.Typer(no_args_is_help=True, help="Available execution scripts.")
 logs_app = typer.Typer(no_args_is_help=True, help="Read and follow task logs.")
 egress_app = typer.Typer(no_args_is_help=True, help="Configure isolated outbound groups and Clash rules.")
+servers_app = typer.Typer(no_args_is_help=True, help="Test game login availability through assigned egress groups.")
 for name, commands in (("accounts", accounts_app), ("sessions", sessions_app),
-                       ("tasks", tasks_app), ("scripts", scripts_app), ("logs", logs_app), ("egress", egress_app)):
+                       ("tasks", tasks_app), ("scripts", scripts_app), ("logs", logs_app), ("egress", egress_app),
+                       ("servers", servers_app)):
     app.add_typer(commands, name=name)
 
 
@@ -230,6 +235,95 @@ def tasks_start(ctx: typer.Context, file: Path = typer.Option(..., "--file", exi
 @tasks_app.command("list")
 def tasks_list(ctx: typer.Context):
     _call(ctx, "GET", "/tasks")
+
+
+@servers_app.command("probe")
+def servers_probe(ctx: typer.Context,
+                  file: Path = typer.Option(..., "--file", exists=True, dir_okay=False),
+                  at: str | None = typer.Option(None, "--at", help="One-shot ISO 8601 start time, including timezone."),
+                  dry_run: bool = typer.Option(False, "--dry-run", help="Validate assignments without game traffic.")):
+    """Submit one probe batch; --at waits locally before submission."""
+    from src.service.contracts import TaskSpec
+
+    async def operation():
+        value = _load(file)
+        if not isinstance(value, dict):
+            raise ValueError("Probe file must contain a JSON object")
+        value = {"kind": "server_probe", **value}
+        if at is not None:
+            value["planned_at"] = at
+        spec = TaskSpec.model_validate(value)
+        if spec.kind != "server_probe":
+            raise ValueError("This command only accepts server_probe tasks")
+        if spec.planned_at is not None and spec.planned_at <= datetime.now(timezone.utc):
+            raise ValueError("Planned time has already passed")
+        body = spec.model_dump(mode="json")
+        checked = await _request(ctx.obj, "POST", "/tasks/validate", body)
+        if dry_run:
+            return checked
+        if spec.planned_at is not None:
+            while (remaining := (spec.planned_at - datetime.now(timezone.utc)).total_seconds()) > 0:
+                await asyncio.sleep(min(remaining, 30))
+        else:
+            body["planned_at"] = datetime.now(timezone.utc).isoformat()
+        return await _request(ctx.obj, "POST", "/tasks", body)
+
+    _emit(_run(ctx, operation()), ctx.obj)
+
+
+def server_probe_csv(record):
+    stream = io.StringIO(newline="")
+    columns = ["task_id", "planned_at", "batch_started_at", "batch_finished_at", "target_index", "host",
+               "flash_port", "h5_port", "domain", "source_server_index", "account_id", "egress_group_id",
+               "exit_ip", "transport", "status", "stage", "server_index", "zone_index", "zone_name",
+               "started_at", "finished_at", "duration_ms", "authenticate_ms", "connect_ms", "login_ms",
+               "connection_status", "login_status", "error"]
+    writer = csv.DictWriter(stream, fieldnames=columns)
+    writer.writeheader()
+    for server in record.get("server_results", []):
+        for transport in ("flash", "h5"):
+            result = server[transport]
+            row = {name: result.get(name) for name in columns if name in result}
+            row.update({name: server.get(name) for name in ("target_index", "account_id", "egress_group_id", "exit_ip")})
+            row.update({name: server["server"][name] for name in ("host", "flash_port", "h5_port", "domain")})
+            row.update(task_id=record["task_id"], planned_at=record.get("spec", {}).get("planned_at"),
+                       batch_started_at=record.get("started_at"), batch_finished_at=record.get("finished_at"),
+                       source_server_index=server["server"].get("server_index"), transport=transport)
+            row.update({name + "_ms": result.get("stage_durations_ms", {}).get(name)
+                        for name in ("authenticate", "connect", "login")})
+            if server.get("error"):
+                row["error"] = result.get("error") or server["error"]["message"]
+            writer.writerow(row)
+    return stream.getvalue()
+
+
+@servers_app.command("results")
+def servers_results(ctx: typer.Context, task_id: str,
+                    format: str = typer.Option("json", "--format", help="json or csv"),
+                    output: Path | None = typer.Option(None, "--output", dir_okay=False)):
+    """Read a probe task and optionally export a new JSON/CSV file."""
+    if format not in {"json", "csv"}:
+        raise typer.BadParameter("Format must be json or csv")
+
+    async def operation():
+        record = await _request(ctx.obj, "GET", f"/tasks/{task_id}")
+        if record["kind"] != "server_probe":
+            raise ValueError("Task is not a server_probe")
+        return record
+
+    record = _run(ctx, operation())
+    text = server_probe_csv(record) if format == "csv" else json.dumps(record, ensure_ascii=False, indent=2) + "\n"
+    if output is not None:
+        try:
+            with output.open("x", encoding="utf-8-sig" if format == "csv" else "utf-8", newline="") as stream:
+                stream.write(text)
+        except OSError as error:
+            raise typer.BadParameter(f"Cannot create export {output.name}: {type(error).__name__}") from None
+        _emit({"task_id": task_id, "output": str(output), "format": format}, ctx.obj)
+    elif format == "csv":
+        typer.echo(text, nl=False)
+    else:
+        _emit(record, ctx.obj)
 
 
 @tasks_app.command("status")

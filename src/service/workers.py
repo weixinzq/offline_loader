@@ -252,6 +252,10 @@ class RemoteAccountConnection:
         self._online = result["connected"]
         return self._online
 
+    async def probe_server(self, target, timeout, outcome):
+        await self.worker.request("server_probe", self.account_id,
+            {"config": self.spec.config, "target": target, "timeout": timeout}, outcome=outcome)
+
     def lost(self, reason):
         self._online = False
         self.last_error = reason

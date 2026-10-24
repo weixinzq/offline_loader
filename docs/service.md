@@ -266,3 +266,7 @@ python -B -m unittest scripts.test_cli_jobs scripts.test_rank_info scripts.test_
 Linux 进程测试包含实际安装的 `aola` 命令在仓库外启动、SIGTERM、持续 SSE 和 SIGKILL 后恢复；Windows 跳过这组 POSIX 验收。旧分离进程 CLI 的单项测试已退休，由新的服务进程测试替代；其余旧配置、协议及脚本测试继续保留。
 
 指定测试服务器的 SSH 别名为 `aliyun-test`，用户为 `codex-test`，所有测试只能在 `/home/codex-test/workspace` 内进行。不使用 sudo/root，不改生产文件，不访问生产数据库或密钥。缺少系统依赖或 TUN 能力时由管理员准备，测试后保留结果和日志。本说明不声明尚未现场完成的 Linux、真实账号或 TUN 出口验收。
+
+## 一次性服务器登录可用性测试
+
+`aola servers probe --file probe.json` 提交 `kind: server_probe` 任务，复用现有后台、离线账号互斥和出口分组 worker。每个服务器条目仅分配一个代理通道，Flash TCP/H5 WSS 分别认证、登录、断开并记录结果，不执行玩家初始化或业务脚本。`--dry-run` 展示分配与容量，`--at` 在 CLI 等待到指定时间后提交一次。查询和取消使用现有任务接口；`aola servers results TASK_ID --format csv --output results.csv` 导出逐传输报告。输入、状态、时间与实际代理路由的证据边界见[服务器可用性测试](server-probe.md)。

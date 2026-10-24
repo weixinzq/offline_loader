@@ -691,6 +691,43 @@ export interface components {
             /** Script Id */
             script_id: string;
         };
+        /** ServerProbeResult */
+        ServerProbeResult: {
+            /** Target Index */
+            target_index: number;
+            server: components["schemas"]["ServerTarget"];
+            /** Account Id */
+            account_id: string;
+            /** Egress Group Id */
+            egress_group_id: string;
+            /** Exit Ip */
+            exit_ip?: string | null;
+            /** State */
+            state: string;
+            /** Started At */
+            started_at?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            error?: components["schemas"]["ErrorInfo"] | null;
+            flash: components["schemas"]["TransportProbeResult"];
+            h5: components["schemas"]["TransportProbeResult"];
+        };
+        /** ServerTarget */
+        ServerTarget: {
+            /** Host */
+            host: string;
+            /** Flash Port */
+            flash_port: number;
+            /** H5 Port */
+            h5_port: number;
+            /**
+             * Domain
+             * @default
+             */
+            domain: string;
+            /** Server Index */
+            server_index?: number | null;
+        };
         /** SessionInput */
         SessionInput: {
             /** Account Ids */
@@ -766,6 +803,14 @@ export interface components {
             login_concurrency: number;
             /** Skipped Accounts */
             skipped_accounts?: components["schemas"]["SkippedAccount"][];
+            /** Server Assignments */
+            server_assignments?: {
+                [key: string]: unknown;
+            }[];
+            /** Effective Concurrency */
+            effective_concurrency?: number | null;
+            /** Max Transport Attempts */
+            max_transport_attempts?: number | null;
         };
         /** TaskRecord */
         TaskRecord: {
@@ -779,11 +824,13 @@ export interface components {
             error: components["schemas"]["ErrorInfo"] | null;
             /** Account Results */
             account_results: components["schemas"]["AccountResult"][];
+            /** Server Results */
+            server_results?: components["schemas"]["ServerProbeResult"][];
             /**
              * Kind
              * @enum {string}
              */
-            kind: "connect" | "reconnect" | "disconnect" | "execute";
+            kind: "connect" | "reconnect" | "disconnect" | "execute" | "server_probe";
             /** Created At */
             created_at: string;
             /** Updated At */
@@ -809,6 +856,8 @@ export interface components {
             error: components["schemas"]["ErrorInfo"] | null;
             /** Account Results */
             account_results: components["schemas"]["AccountResult"][];
+            /** Server Results */
+            server_results?: components["schemas"]["ServerProbeResult"][];
         };
         /** TaskSpec */
         TaskSpec: {
@@ -817,7 +866,7 @@ export interface components {
              * @default execute
              * @enum {string}
              */
-            kind: "connect" | "reconnect" | "disconnect" | "execute";
+            kind: "connect" | "reconnect" | "disconnect" | "execute" | "server_probe";
             /** Account Ids */
             account_ids: string[];
             /**
@@ -854,6 +903,47 @@ export interface components {
             message_delay: number;
             /** Steps */
             steps?: (components["schemas"]["MessagesStep"] | components["schemas"]["ScriptStepSpec"])[];
+            /** Server Targets */
+            server_targets?: components["schemas"]["ServerTarget"][];
+            /** Probe Timeout */
+            probe_timeout?: number | null;
+            /** Planned At */
+            planned_at?: string | null;
+        };
+        /** TransportProbeResult */
+        TransportProbeResult: {
+            /** Status */
+            status: string;
+            /** Stage */
+            stage?: string | null;
+            /** Started At */
+            started_at?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Duration Ms */
+            duration_ms?: number | null;
+            /** Stage Durations Ms */
+            stage_durations_ms?: {
+                [key: string]: number;
+            };
+            /**
+             * Connection Status
+             * @default not_attempted
+             */
+            connection_status: string;
+            /**
+             * Login Status
+             * @default not_attempted
+             */
+            login_status: string;
+            /** Server Index */
+            server_index?: number | null;
+            /** Zone Index */
+            zone_index?: number | null;
+            /** Zone Name */
+            zone_name?: string | null;
+            /** Error */
+            error?: string | null;
         };
         /** ValidateMessagesInput */
         ValidateMessagesInput: {
