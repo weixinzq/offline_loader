@@ -161,6 +161,7 @@ class TransportProbeResult(BaseModel):
     initialized_at: str | None = None
     execution: dict[str, Any] = Field(default_factory=dict)
     attempts: list[dict[str, Any]] = Field(default_factory=list)
+    skipped_slots: list[dict[str, Any]] = Field(default_factory=list)
     server_index: int | None = None
     zone_index: int | None = None
     zone_name: str | None = None

@@ -1,8 +1,9 @@
 """One-shot game login probes; called only inside the selected egress worker."""
 import asyncio
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
+import math
 from time import monotonic
 
 from src.accounts.login import http_login
@@ -23,7 +24,7 @@ def transport_result():
             "connected_at": None, "logged_in_at": None,
             "authentication_response": {}, "login_response": {},
             "initialization_status": "not_attempted", "initialized_at": None,
-            "execution": {}, "attempts": [],
+            "execution": {}, "attempts": [], "skipped_slots": [],
             "server_index": None, "zone_index": None, "zone_name": None, "error": None}
 
 
@@ -58,7 +59,7 @@ async def close_socket(socket, timeout):
         raise
 
 
-async def _probe_once(config, target, timeout, outcome, redactor, transport, steps, log):
+async def _probe_once(config, target, timeout, outcome, redactor, transport, steps, log, deadline=None):
     """Fill partial results even on cancellation; never return credentials or raw replies."""
     outcome.update(flash=transport_result(), h5=transport_result())
     if not target["flash_port"]:
@@ -74,8 +75,13 @@ async def _probe_once(config, target, timeout, outcome, redactor, transport, ste
         row.update(status="running", stage="authenticate", started_at=now())
         socket = None
         context = None
+        def phase_timeout():
+            remaining = (deadline - datetime.now(timezone.utc)).total_seconds() if deadline else timeout
+            if remaining <= 0:
+                raise TimeoutError("测试窗口已结束")
+            return min(timeout, remaining)
         try:
-            async with asyncio.timeout(timeout):
+            async with asyncio.timeout(phase_timeout()):
                 login = await http_login(config["account"], config["password"],
                     char_id=config.get("char_id", 0), login_url=config.get("login_url"),
                     register_url=config.get("register_url"), browser_verification=False,
@@ -106,11 +112,15 @@ async def _probe_once(config, target, timeout, outcome, redactor, transport, ste
             if not zones:
                 row.update(status="no_zone", stage="resolve", error="服务器条目没有关联的可测试区服")
                 continue
-            zone = min(zones, key=lambda z: z.zone_index)
+            zone = (next((z for z in zones if z.zone_index == target["zone_index"]), None)
+                    if target.get("zone_index") is not None else min(zones, key=lambda z: z.zone_index))
+            if zone is None:
+                row.update(status="no_zone", stage="resolve", error="目标服务器中没有指定区服")
+                continue
             row.update(zone_index=zone.zone_index, zone_name=zone.zone_name, stage="connect")
             stage_started = monotonic()
             socket = GameSocket(login.session_id, network_mode="system")
-            async with asyncio.timeout(timeout):
+            async with asyncio.timeout(phase_timeout()):
                 connected = await (socket.connect_tcp(server.host, server.flash_port, timeout)
                     if transport == "flash" else socket.connect_ws(server.domain, server.h5_port, timeout))
             row["stage_durations_ms"]["connect"] = round((monotonic() - stage_started) * 1000, 1)
@@ -121,7 +131,7 @@ async def _probe_once(config, target, timeout, outcome, redactor, transport, ste
             row["connected_at"] = now()
             row["stage"] = "login"
             stage_started = monotonic()
-            async with asyncio.timeout(timeout):
+            async with asyncio.timeout(phase_timeout()):
                 reply = await socket.login(f"{zone.zone_index} {zone.zone_name}", login.user_id, login.session_id)
             row["stage_durations_ms"]["login"] = round((monotonic() - stage_started) * 1000, 1)
             row["login_response"] = safe_response(socket.login_response or reply or {}, redactor)
@@ -200,23 +210,43 @@ async def _probe_once(config, target, timeout, outcome, redactor, transport, ste
                 row.update(finished_at=now(), duration_ms=round((monotonic() - started) * 1000, 1))
 
 
-async def probe_server(config, target, timeout, outcome, redactor, *, steps=(), attempts=1, log=None):
+async def probe_server(config, target, timeout, outcome, redactor, *, steps=(), attempts=1, log=None, window=None):
     """One account owns both transports, including retries, script and complete cleanup."""
     outcome.update(flash=transport_result(), h5=transport_result())
     for transport in ("flash", "h5"):
+        if target.get("transport") and target["transport"] != transport:
+            outcome[transport]["status"] = "not_selected"
+            continue
         history = []
+        skipped = []
+        slot = 0
+        start = datetime.fromisoformat(window["start"]) if window else None
+        deadline = datetime.fromisoformat(window["until"]) if window else None
+        if window:
+            slot = max(0, math.ceil((datetime.now(timezone.utc) - start).total_seconds()))
+            skipped.extend({"slot": missed, "scheduled_at": (start + timedelta(seconds=missed)).isoformat(),
+                            "reason": "worker_not_ready"} for missed in range(min(slot, attempts)))
+            outcome[transport]["skipped_slots"] = skipped
         for attempt in range(1, attempts + 1):
+            if window:
+                tick = start + timedelta(seconds=slot)
+                if slot >= attempts or tick >= deadline or datetime.now(timezone.utc) >= deadline:
+                    break
+                await asyncio.sleep(max(0, (tick - datetime.now(timezone.utc)).total_seconds()))
+                if datetime.now(timezone.utc) >= deadline:
+                    break
             current = {}
             prefix = f"{target['host']}:{target[transport + '_port']} {transport} 第{attempt}/{attempts}次"
             if log:
                 log(prefix + " 开始登录")
             try:
-                await _probe_once(config, target, timeout, current, redactor, transport, steps, log)
+                await _probe_once(config, target, timeout, current, redactor, transport, steps, log, deadline)
             finally:
                 if transport in current:
                     row = current[transport]
-                    history.append(deepcopy(safe_response({**row, "attempt": attempt}, redactor)))
-                    outcome[transport] = {**safe_response(row, redactor), "attempts": history}
+                    timing = {"slot": slot, "scheduled_at": tick.isoformat()} if window else {}
+                    history.append(deepcopy(safe_response({**row, "attempt": attempt, **timing}, redactor)))
+                    outcome[transport] = {**safe_response(row, redactor), "attempts": history, "skipped_slots": skipped}
                     if log:
                         log(prefix + " 结果 " + json.dumps(outcome[transport], ensure_ascii=False))
                 if current.get("blocked_code"):
@@ -225,5 +255,12 @@ async def probe_server(config, target, timeout, outcome, redactor, *, steps=(), 
                 return
             if row["login_status"] == "succeeded" or row["status"] in {"not_supported", "cleanup_failed"}:
                 break
-            if attempt < attempts:
+            if window:
+                next_slot = max(slot + 1, math.ceil((datetime.now(timezone.utc) - start).total_seconds()))
+                for missed in range(slot + 1, min(next_slot, attempts)):
+                    missed_at = start + timedelta(seconds=missed)
+                    if missed_at < deadline:
+                        skipped.append({"slot": missed, "scheduled_at": missed_at.isoformat(), "reason": "previous_attempt_busy"})
+                slot = next_slot
+            elif attempt < attempts:
                 await asyncio.sleep(.5)

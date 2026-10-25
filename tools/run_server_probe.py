@@ -1,9 +1,10 @@
 """Submit one scheduled probe and retain its results and complete public logs."""
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import re
 import time
 import urllib.request
 
@@ -24,7 +25,9 @@ def run(file, output, at, request, *, clock=lambda: datetime.now(timezone.utc), 
     save("preflight.json", checked)
     save("schedule.json", {"state": "waiting", "planned_at": at.isoformat()})
     print("Waiting until " + at.isoformat(), flush=True)
-    while (remaining := (at - clock()).total_seconds()) > 0:
+    # Prepare workers and check exits before a fixed one-second login window.
+    dispatch_at = at - timedelta(seconds=10) if body.get("probe_until") else at
+    while (remaining := (dispatch_at - clock()).total_seconds()) > 0:
         sleep(min(remaining, 1))
     record = request("POST", "/tasks", body)
     task_id = record["task_id"]
@@ -32,15 +35,22 @@ def run(file, output, at, request, *, clock=lambda: datetime.now(timezone.utc), 
     save("schedule.json", {"state": "submitted", "planned_at": at.isoformat(), "task_id": task_id})
     print("Submitted " + task_id, flush=True)
     after = 0
-    with (output / "task.log").open("w", encoding="utf-8") as logs:
+    with (output / "task.log").open("w", encoding="utf-8") as logs, \
+         (output / "task-beijing.log").open("w", encoding="utf-8") as beijing_logs:
         while True:
             record = request("GET", "/tasks/" + task_id)
             while True:
                 rows = request("GET", f"/tasks/{task_id}/logs?after={after}&limit=1000")
                 for row in rows:
-                    logs.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    line = json.dumps(row, ensure_ascii=False) + "\n"
+                    logs.write(line)
+                    beijing_logs.write(re.sub(
+                        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
+                        lambda m: datetime.fromisoformat(m.group().replace("Z", "+00:00")).astimezone(
+                            timezone(timedelta(hours=8))).isoformat(), line))
                     after = row["id"]
                 logs.flush()
+                beijing_logs.flush()
                 if len(rows) < 1000:
                     break
             save("results.json", record)

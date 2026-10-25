@@ -1,3 +1,0 @@
-#send={"param":{"index":561},"cmd":"MostGloriousPMResponder_1","id":42}|
-#send={"param":{"index":561},"cmd":"MostGloriousPMResponder_9","id":42}|
-#send={"param":{"index":561},"cmd":"MostGloriousPMResponder_6","id":42}|

@@ -89,6 +89,8 @@ class ServerTarget(InputModel):
     h5_port: int = Field(ge=0, le=65535, strict=True)
     domain: str = Field(default="", max_length=253)
     server_index: int | None = Field(default=None, ge=0, strict=True)
+    zone_index: int | None = Field(default=None, ge=1, strict=True)
+    transport: Literal["flash", "h5"] | None = None
 
     @field_validator("host")
     @classmethod
@@ -116,8 +118,9 @@ class TaskSpec(InputModel):
     steps: list[StepSpec] = Field(default_factory=list)
     server_targets: list[ServerTarget] = Field(default_factory=list, max_length=200)
     probe_timeout: float | None = Field(default=None, gt=0, le=120)
-    probe_attempts: int | None = Field(default=None, ge=1, le=5, strict=True)
+    probe_attempts: int | None = Field(default=None, ge=1, le=25, strict=True)
     planned_at: datetime | None = None
+    probe_until: datetime | None = None
 
     @model_validator(mode="after")
     def validate_task(self):
@@ -137,8 +140,17 @@ class TaskSpec(InputModel):
                 raise ValueError("服务器条目不可重复")
             if self.session_policy != "temporary" or self.mode != "bounded" or self.repetitions != 1:
                 raise ValueError("服务器测试只支持 temporary/bounded，且只能测试一轮")
-        elif self.server_targets or self.planned_at is not None:
+        elif self.server_targets or self.planned_at is not None or self.probe_until is not None:
             raise ValueError("服务器条目和计划时间仅用于 server_probe")
         if self.planned_at is not None and self.planned_at.utcoffset() is None:
             raise ValueError("计划时间必须包含时区")
+        if self.probe_until is not None:
+            if self.probe_until.utcoffset() is None or self.planned_at is None:
+                raise ValueError("每秒测试需要包含时区的开始和结束时间")
+            if not 0 < (self.probe_until - self.planned_at).total_seconds() <= 25:
+                raise ValueError("每秒测试窗口必须大于0秒且不超过25秒")
+            if any(t.zone_index is None or t.transport is None for t in self.server_targets):
+                raise ValueError("每秒测试必须明确区服和单一传输方式")
+        elif (self.probe_attempts or 1) > 5:
+            raise ValueError("普通服务器测试每种传输最多5次")
         return self

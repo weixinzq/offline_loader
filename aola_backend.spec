@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 analysis = Analysis(
-    ["backend_main.py"],
+    ["src/ipc/server.py"],
     pathex=[],
     binaries=[],
     datas=[
@@ -12,18 +12,17 @@ analysis = Analysis(
         ("scripts/mt250816_4.py", "scripts"),
         ("scripts/auto_battle.py", "scripts"),
         ("scripts/auto_escape.py", "scripts"),
-        ("scripts/double_auto_escape.py", "scripts"),
         ("scripts/wait_escape.py", "scripts"),
         ("scripts/rank_info.py", "scripts"),
     ],
     hiddenimports=[
+        "src.ipc.server",
         "scripts.mt250816_1",
         "scripts.mt250816_2",
         "scripts.mt250816_3",
         "scripts.mt250816_4",
         "scripts.auto_battle",
         "scripts.auto_escape",
-        "scripts.double_auto_escape",
         "scripts.wait_escape",
         "scripts.rank_info",
     ],

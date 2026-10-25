@@ -1,90 +1,65 @@
-# 本地账号、配置和环境变量（保留脱敏示例）
-.env
-.env.*
-!.env.example
-config.json
-config.*.json
-config__.json
-!config.example.json
-accounts.json
-accounts.*
-accounts_*
-credentials.json
-credentials.*
-credentials_*
-cookies.json
-cookies.txt
-cookies_*
-tokens.json
-tokens.*
-*.session
-*.session-journal
+# 默认只发布下方列出的源码、依赖和构建输入；本地任务及运行数据不纳入 Git。
+*
+!*/
 
-# 私钥和含私钥的证书
-*.key
-*.pem
-*.pfx
-*.p12
-id_rsa
-id_rsa.*
-id_ed25519
-id_ed25519.*
+# 项目入口、依赖和说明
+!/.gitignore
+!/README.md
+!/pyproject.toml
+!/requirements.txt
+!/requirements.lock
+!/requirements-build.txt
+!/cli_main.py
+!/backend_main.py
 
-# Python 缓存、虚拟环境和测试缓存
+# Python 实现和随程序提供的专用脚本
+!/src/**/*.py
+!/scripts/*.py
+/scripts/test_*.py
+/scripts/verify.py
+/scripts/_fake_mihomo.py
+
+# 网页源码及构建依赖
+!/frontend/index.html
+!/frontend/package.json
+!/frontend/package-lock.json
+!/frontend/tsconfig.json
+!/frontend/vite.config.ts
+!/frontend/src/**/*.vue
+!/frontend/src/**/*.ts
+!/frontend/src/**/*.css
+/frontend/src/**/*.test.ts
+
+# 旧版 Windows 桌面源码及打包输入
+!/csharp/AolaLoader/**/*.cs
+!/csharp/AolaLoader/**/*.xaml
+!/csharp/AolaLoader/*.csproj
+!/build_wpf.ps1
+!/aola_backend.spec
+!/config.example.json
+
+# 通用接口导出和探测工具；具体任务 JSON 不发布
+!/tools/export_openapi.py
+!/tools/run_server_probe.py
+
+# 排除缓存、依赖、构建产物与本地文件（优先于上方源码规则）
+.git/
 __pycache__/
-*.py[cod]
-.venv/
-venv/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-
-# 编辑器的个人配置
-.vscode/
-.idea/
-
-# 日志、崩溃报告和本地诊断证据
-*.log
-hs_err_pid*.log
-/log/
+node_modules/
+bin/
+obj/
+/.venv/
+/build/
+/dist/
+/frontend/dist/
+/frontend/coverage/
+/data/
 /logs/
 /evidence/
 /.git-backups/
-
-# 网络抓包、解包和逆向分析产物
-*.saz
-*.pcap
-*.pcapng
-saz_extract/
-*.swf
-ffdec_export/
-activity240906/
-/gamemain~*.js
 /analysis/
 /tte/
-
-# 桌面程序构建产物
-/build/
-/dist/
-/data/service/
-frontend/node_modules/
-frontend/dist/
-**/bin/
-**/obj/
-
-# 临时文件
-*.tmp
-*.bak
-~$*
-.DS_Store
-Thumbs.db
-
-# 本地任务说明和调度入口
-prompt.md
-TASK.md
-process.md
-read.md
-scheduled_run.ps1
+/Script/
+/Com/
+/.agents/
+/.codex/

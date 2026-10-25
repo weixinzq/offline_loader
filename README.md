@@ -4,7 +4,23 @@
 
 ## 启动
 
-使用 Python 3.12，在项目根目录创建并激活虚拟环境，然后安装依赖：
+需要 Python 3.12、Node.js 22.12 或更高版本和 npm。克隆仓库后，在项目根目录创建虚拟环境。
+
+Windows PowerShell：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+Linux：
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+```
+
+安装后台依赖：
 
 ```bash
 python -m pip install -r requirements.txt
@@ -32,8 +48,23 @@ python cli_main.py --help
 python cli_main.py --json accounts list
 ```
 
-批量登录、选择就绪账号、组合任务与断线处理的操作步骤见 [批量操作手册](batch_operations.md)。完整安装、认证、任务配置与迁移、HTTP 边界、Clash TUN 和 Linux 运行说明见 [服务使用说明](docs/service.md)。接口契约见 [OpenAPI 快照](docs/openapi.json)，运行中的交互文档位于 `/docs`。
+默认监听 `127.0.0.1:8765`，运行数据保存在 `data/service`。账号、出口分组和任务在安装后自行设置，不随源码发布。网页关闭后任务仍由后台执行；后台重启不会自动重放未完成任务。
 
-需要按每批账号使用不同节点时，见[多出口账号分组](docs/egress-groups.md)：每组独立进程，Clash 按完整进程路径路由，默认每组30个、全局100个在线名额；容量与登录并发可单独配置。[300账号云端工作流](docs/cloud-workflows.md)提供10出口配置和可自行填写任务的启动脚本。
+## 源码与构建
 
-旧桌面端、命名管道和旧 CLI 实现源码保留用于参考。当前 `cli_main.py` 是 HTTP 客户端，`backend_main.py` 启动独立服务；旧 WPF 打包和运行兼容性不属于新入口的承诺。
+- `src/`：账号登录、游戏通信、协议、消息处理、后台服务和接口。
+- `scripts/`：随程序提供的专用脚本。
+- `frontend/`：Vue 网页源码、依赖锁文件和构建配置；`npm run build` 输出到 `frontend/dist`。
+- `tools/`：通用接口导出和服务器探测工具。
+- `csharp/AolaLoader/`：旧版 WPF 桌面源码，使用命名管道后台，与网页服务分别启动。
+
+仓库只跟踪源码、依赖清单、构建输入和本 README。本地账号配置、任务消息文件、云端任务编排、日志、数据库、分析资料及编译产物不纳入 Git。
+
+如需构建旧版 Windows 桌面程序，安装 .NET 8 SDK，在已激活的 Python 3.12 环境运行：
+
+```powershell
+python -m pip install -r requirements-build.txt
+.\build_wpf.ps1
+```
+
+输出为 `dist/AolaLoader/AolaLoader.exe` 及命名管道后台 `AolaBackend.exe`。桌面账号配置参考随包提供的 `config.example.json`，自行创建 `config.json`。该模板仅含占位值。

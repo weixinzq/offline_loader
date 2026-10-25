@@ -85,8 +85,10 @@ class TaskService:
             result["server_assignments"] = self._server_rows(spec, accounts)
             result["effective_concurrency"] = min(spec.concurrency, self.sessions.login_concurrency,
                 capacity["required_capacity"], len(accounts))
-            result["max_transport_attempts"] = (spec.probe_attempts or 1) * sum(int(target.flash_port > 0) +
-                int(target.h5_port > 0 and bool(target.domain)) for target in spec.server_targets)
+            result["max_transport_attempts"] = (spec.probe_attempts or 1) * sum(
+                int(target.flash_port > 0 and target.transport != "h5") +
+                int(target.h5_port > 0 and bool(target.domain) and target.transport != "flash")
+                for target in spec.server_targets)
         return result
 
     @staticmethod
@@ -328,11 +330,14 @@ class TaskService:
                         await self.sessions.probe_server(run.record["task_id"], account, row["server"],
                                                          run.spec.probe_timeout or 15, outcome,
                                                          steps=[step.model_dump() for step in run.spec.steps],
-                                                         attempts=run.spec.probe_attempts or 1)
+                                                         attempts=run.spec.probe_attempts or 1,
+                                                         window={"start": run.spec.planned_at.isoformat(),
+                                                                 "until": run.spec.probe_until.isoformat()}
+                                                         if run.spec.probe_until else None)
                         if outcome.get("blocked_code"):
                             raise ServiceError(outcome["blocked_code"], "登录受到限制，停止本轮测试")
                         statuses = [outcome[name]["status"] for name in ("flash", "h5")]
-                        row["state"] = "succeeded" if all(s in {"available", "not_supported"} for s in statuses) else "failed"
+                        row["state"] = "succeeded" if all(s in {"available", "not_supported", "not_selected"} for s in statuses) else "failed"
                         if any(outcome[name].get("execution", {}).get("success") is False
                                or outcome[name].get("initialization_status") in {"failed", "timeout"}
                                for name in ("flash", "h5")):
@@ -341,7 +346,7 @@ class TaskService:
                             row["state"] = "skipped"
                         if row["state"] == "failed":
                             failed = next(outcome[name] for name in ("flash", "h5")
-                                          if outcome[name]["status"] not in {"available", "not_supported"}
+                                          if outcome[name]["status"] not in {"available", "not_supported", "not_selected"}
                                           or outcome[name].get("error"))
                             row["error"] = {"code": failed["status"], "message": failed["error"] or "未完成游戏登录测试"}
                             account_row["error"] = row["error"]

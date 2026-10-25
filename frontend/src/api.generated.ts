@@ -727,6 +727,10 @@ export interface components {
             domain: string;
             /** Server Index */
             server_index?: number | null;
+            /** Zone Index */
+            zone_index?: number | null;
+            /** Transport */
+            transport?: ("flash" | "h5") | null;
         };
         /** SessionInput */
         SessionInput: {
@@ -911,6 +915,8 @@ export interface components {
             probe_attempts?: number | null;
             /** Planned At */
             planned_at?: string | null;
+            /** Probe Until */
+            probe_until?: string | null;
         };
         /** TransportProbeResult */
         TransportProbeResult: {
@@ -963,6 +969,10 @@ export interface components {
             };
             /** Attempts */
             attempts?: {
+                [key: string]: unknown;
+            }[];
+            /** Skipped Slots */
+            skipped_slots?: {
                 [key: string]: unknown;
             }[];
             /** Server Index */

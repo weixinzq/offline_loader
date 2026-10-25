@@ -76,7 +76,7 @@ class WorkerHost:
             try:
                 steps = self.registry.build_steps(TypeAdapter(list[StepSpec]).validate_python(data.get("steps", [])))
                 await probe_server(config, data["target"], data["timeout"], outcome, self.redactor,
-                                   steps=steps, attempts=data.get("attempts", 1), log=self.log)
+                                   steps=steps, attempts=data.get("attempts", 1), log=self.log, window=data.get("window"))
                 return outcome
             finally:
                 self.probing.discard(account_id)
