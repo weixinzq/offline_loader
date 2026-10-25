@@ -58,7 +58,7 @@ python cli_main.py --json accounts list
 - `tools/`：通用接口导出和服务器探测工具。
 - `csharp/AolaLoader/`：旧版 WPF 桌面源码，使用命名管道后台，与网页服务分别启动。
 
-仓库只跟踪源码、依赖清单、构建输入和本 README。本地账号配置、任务消息文件、云端任务编排、日志、数据库、分析资料及编译产物不纳入 Git。
+
 
 如需构建旧版 Windows 桌面程序，安装 .NET 8 SDK，在已激活的 Python 3.12 环境运行：
 
