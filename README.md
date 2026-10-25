@@ -41,7 +41,7 @@ cd ..
 python cli_main.py serve
 ```
 
-首次启动自动创建 `data/service/admin.token`，启动输出只显示文件路径。浏览器使用该文件中的管理员凭据登录；CLI 从 `AOLA_ADMIN_TOKEN` 环境变量读取凭据。账号密码不会由账号查询接口返回。
+打开网页即可使用，无需管理员 token 或登录流程，CLI 也无需设置凭据。账号密码不会由账号查询接口返回。
 
 ```bash
 python cli_main.py --help

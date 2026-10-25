@@ -184,6 +184,13 @@ class Store:
                         row["state"] = "interrupted"
                 self.save_task(record)
 
+    def delete_tasks(self, task_ids):
+        if not task_ids:
+            return
+        with self.engine.begin() as connection:
+            connection.execute(logs.delete().where(logs.c.task_id.in_(task_ids)))
+            connection.execute(tasks.delete().where(tasks.c.task_id.in_(task_ids)))
+
     def append_log(self, task_id, account_id, message):
         row = {"task_id": task_id, "account_id": account_id, "timestamp": utc_now(), "message": self.redact(str(message))}
         with self.engine.begin() as connection:

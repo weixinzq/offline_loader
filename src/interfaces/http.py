@@ -1,42 +1,34 @@
-"""Authenticated HTTP adapter. Business state belongs to the application services."""
+"""HTTP adapter. Business state belongs to the application services."""
 from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-import hmac
 import json
 import os
 from pathlib import Path
-import secrets
 from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from fastapi.security import APIKeyCookie, HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.service.application import Application
 from src.service.contracts import AccountInput, AccountPatch, EgressAssignment, EgressGroupInput, MessageSpec, ServiceError, TaskSpec
 from src.interfaces.schemas import (
-    AccountImportResult, AccountRecord, AuthStatus, ErrorResponse, HealthStatus,
+    AccountImportResult, AccountRecord, TaskClearResult, ErrorResponse, HealthStatus,
     LogEntry, MessagesValidation, ScriptRecord, SessionRecord, TaskPreflight,
     TaskRecord, TaskResults, EgressGroupRecord, EgressRules, EgressAssignmentResult,
 )
 
 
-COOKIE_NAME = "aola_session"
 API_PREFIX = "/api/v1"
 
 
 class InputModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-class LoginInput(InputModel):
-    token: str = Field(min_length=1)
 
 
 class ConfigInput(InputModel):
@@ -67,27 +59,6 @@ def default_data_dir() -> Path:
     return Path(os.environ.get("AOLA_DATA_DIR", "data/service"))
 
 
-def load_admin_token(data_dir: Path, provided: str | None = None) -> str:
-    """Keep the generated secret on disk, never in ordinary startup output."""
-    token = provided or os.environ.get("AOLA_ADMIN_TOKEN")
-    if token:
-        return token
-    data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    token_path = data_dir / "admin.token"
-    try:
-        descriptor = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        token_path.chmod(0o600)
-        token = token_path.read_text(encoding="utf-8").strip()
-        if not token:
-            raise RuntimeError(f"Administrator token file is empty: {token_path}")
-        return token
-    token = secrets.token_urlsafe(32)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        stream.write(token + "\n")
-    return token
-
-
 def _same_origin(request: Request) -> bool:
     origin = request.headers.get("origin")
     if not origin:
@@ -106,9 +77,7 @@ def _same_origin(request: Request) -> bool:
 
 def create_app(
     data_dir: str | Path | None = None,
-    admin_token: str | None = None,
     application: Application | None = None,
-    secure_cookies: bool = False,
     frontend_dir: str | Path | None = None,
     max_online: int = 100,
     login_concurrency: int | None = None,
@@ -116,27 +85,23 @@ def create_app(
     directory = Path(data_dir) if data_dir is not None else default_data_dir()
     frontend = (Path(frontend_dir) if frontend_dir is not None else
                 Path(__file__).resolve().parents[2] / "frontend" / "dist").resolve()
-    cookie_sessions: set[str] = set()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.admin_token = load_admin_token(directory, admin_token)
         app.state.application = application or Application(directory, max_online=max_online,
                                                          login_concurrency=login_concurrency)
         try:
             await app.state.application.start()
             yield
         finally:
-            cookie_sessions.clear()
             await app.state.application.close()
 
     app = FastAPI(title="Aola background service", version="1.0.0", lifespan=lifespan,
-                  responses={status: {"model": ErrorResponse} for status in (400, 401, 403, 404, 409, 422, 503)})
+                  responses={status: {"model": ErrorResponse} for status in (400, 403, 404, 409, 422, 503)})
 
     @app.exception_handler(ServiceError)
     async def service_error(_request: Request, error: ServiceError):
-        headers = {"WWW-Authenticate": "Bearer"} if error.status == 401 else None
-        return JSONResponse(status_code=error.status, headers=headers, content={"error": {
+        return JSONResponse(status_code=error.status, content={"error": {
             "code": error.code, "message": error.message,
         }})
 
@@ -149,49 +114,16 @@ def create_app(
             "code": "invalid_request", "message": "Request validation failed", "details": details,
         }})
 
-    bearer_auth = HTTPBearer(auto_error=False)
-    cookie_auth = APIKeyCookie(name=COOKIE_NAME, auto_error=False)
-
-    async def authorize(
-        request: Request,
-        bearer: HTTPAuthorizationCredentials | None = Depends(bearer_auth),
-        cookie: str | None = Depends(cookie_auth),
-    ):
-        if bearer and hmac.compare_digest(bearer.credentials.encode(), request.app.state.admin_token.encode()):
-            return
-        if cookie in cookie_sessions:
-            if request.method not in {"GET", "HEAD", "OPTIONS"} and not _same_origin(request):
-                raise ServiceError("origin_mismatch", "A matching Origin header is required", 403)
-            return
-        raise ServiceError("unauthorized", "Administrator authentication required", 401)
+    async def check_origin(request: Request):
+        if (request.method not in {"GET", "HEAD", "OPTIONS"} and request.headers.get("origin")
+                and not _same_origin(request)):
+            raise ServiceError("origin_mismatch", "A matching Origin header is required", 403)
 
     @app.get(API_PREFIX + "/health", response_model=HealthStatus)
     async def health():
         return {"status": "ok"}
 
-    @app.post(API_PREFIX + "/auth/session", response_model=AuthStatus)
-    async def login(body: LoginInput, request: Request, response: Response):
-        if not _same_origin(request):
-            raise ServiceError("origin_mismatch", "A matching Origin header is required", 403)
-        if not hmac.compare_digest(body.token.encode(), request.app.state.admin_token.encode()):
-            raise ServiceError("unauthorized", "Invalid administrator credential", 401)
-        session_id = secrets.token_urlsafe(32)
-        cookie_sessions.add(session_id)
-        response.set_cookie(COOKIE_NAME, session_id, httponly=True, secure=secure_cookies,
-                            samesite="strict", path=API_PREFIX)
-        return {"authenticated": True}
-
-    api = APIRouter(prefix=API_PREFIX, dependencies=[Depends(authorize)])
-
-    @api.get("/auth/session", response_model=AuthStatus)
-    async def session_status():
-        return {"authenticated": True}
-
-    @api.delete("/auth/session", status_code=204)
-    async def logout(request: Request, response: Response):
-        cookie_sessions.discard(request.cookies.get(COOKIE_NAME, ""))
-        response.delete_cookie(COOKIE_NAME, path=API_PREFIX, secure=secure_cookies,
-                               httponly=True, samesite="strict")
+    api = APIRouter(prefix=API_PREFIX, dependencies=[Depends(check_origin)])
 
     @api.get("/accounts", response_model=list[AccountRecord])
     async def accounts(request: Request):
@@ -292,6 +224,10 @@ def create_app(
     @api.get("/tasks", response_model=list[TaskRecord])
     async def tasks(request: Request):
         return request.app.state.application.tasks.list()
+
+    @api.delete("/tasks", response_model=TaskClearResult)
+    async def clear_tasks(request: Request):
+        return request.app.state.application.tasks.clear_finished()
 
     @api.get("/tasks/{task_id}", response_model=TaskRecord)
     async def task(task_id: str, request: Request):

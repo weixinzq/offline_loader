@@ -2,7 +2,6 @@
 import argparse
 from datetime import datetime, timedelta, timezone
 import json
-import os
 from pathlib import Path
 import re
 import time
@@ -68,13 +67,12 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--at", type=datetime.fromisoformat, required=True)
     args = parser.parse_args()
-    token = os.environ.get("AOLA_ADMIN_TOKEN") or Path("data/service/admin.token").read_text().strip()
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def request(method, path, body=None):
         req = urllib.request.Request("http://127.0.0.1:8765/api/v1" + path,
             data=json.dumps(body).encode() if body is not None else None, method=method,
-            headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+            headers={"Content-Type": "application/json"})
         with opener.open(req, timeout=30) as response:
             return json.load(response)
 

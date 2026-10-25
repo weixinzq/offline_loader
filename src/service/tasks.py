@@ -152,6 +152,14 @@ class TaskService:
     def list(self) -> list[dict]:
         return self.store.list_tasks()
 
+    def clear_finished(self) -> dict:
+        task_ids = [record["task_id"] for record in self.list()
+                    if record["state"] in _TERMINAL and record["task_id"] not in self._runs]
+        self.store.delete_tasks(task_ids)
+        if task_ids:
+            self.events.publish("task", {"deleted_task_ids": task_ids})
+        return {"deleted_count": len(task_ids), "task_ids": task_ids}
+
     def get(self, task_id: str) -> dict:
         return self.store.get_task(task_id)
 

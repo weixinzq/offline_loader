@@ -15,8 +15,9 @@ class ErrorResponse(BaseModel):
     error: ErrorInfo
 
 
-class AuthStatus(BaseModel):
-    authenticated: bool
+class TaskClearResult(BaseModel):
+    deleted_count: int
+    task_ids: list[str]
 
 
 class HealthStatus(BaseModel):

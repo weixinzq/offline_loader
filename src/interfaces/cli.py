@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import io
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +31,6 @@ for name, commands in (("accounts", accounts_app), ("sessions", sessions_app),
 @dataclass
 class Options:
     url: str
-    token: str | None
     json_output: bool
 
 
@@ -40,10 +38,9 @@ class Options:
 def options(
     ctx: typer.Context,
     url: str = typer.Option("http://127.0.0.1:8765", "--url", envvar="AOLA_SERVICE_URL"),
-    token: str | None = typer.Option(None, "--token", envvar="AOLA_ADMIN_TOKEN"),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
 ):
-    ctx.obj = Options(url.rstrip("/"), token, json_output)
+    ctx.obj = Options(url.rstrip("/"), json_output)
 
 
 def _emit(value: Any, options: Options):
@@ -59,10 +56,7 @@ def _load(path: Path) -> Any:
 
 
 async def _request(options: Options, method: str, endpoint: str, body: Any = None):
-    if not options.token:
-        raise ValueError("Set AOLA_ADMIN_TOKEN or use --token to authenticate")
-    headers = {"Authorization": f"Bearer {options.token}"}
-    async with aiohttp.ClientSession(trust_env=False, headers=headers,
+    async with aiohttp.ClientSession(trust_env=False,
                                      timeout=aiohttp.ClientTimeout(total=30)) as client:
         async with client.request(method, options.url + "/api/v1" + endpoint, json=body) as response:
             if response.status == 204:
@@ -83,8 +77,6 @@ def _run(ctx: typer.Context, operation):
         return asyncio.run(operation)
     except (ValueError, aiohttp.ClientError, TimeoutError) as error:
         message = str(error)
-        if ctx.obj.token:
-            message = message.replace(ctx.obj.token, "[redacted]")
         if ctx.obj.json_output:
             _emit({"error": {"code": "cli_error", "message": message}}, ctx.obj)
         else:
@@ -98,11 +90,9 @@ def _call(ctx: typer.Context, method: str, endpoint: str, body: Any = None):
 
 @app.command()
 def serve(
-    ctx: typer.Context,
     data_dir: Path = typer.Option(Path("data/service"), "--data-dir", envvar="AOLA_DATA_DIR"),
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(8765, "--port", min=1, max=65535),
-    secure_cookies: bool = typer.Option(False, "--secure-cookies", help="Require HTTPS for browser cookies."),
     frontend_dir: Path | None = typer.Option(None, "--frontend-dir", envvar="AOLA_FRONTEND_DIR",
                                             help="Built browser frontend directory; defaults to frontend/dist."),
     max_online: int = typer.Option(100, "--max-online", min=1, envvar="AOLA_MAX_ONLINE"),
@@ -112,12 +102,9 @@ def serve(
 ):
     """Run a single-worker backend; use HTTPS reverse proxying for remote access."""
     import uvicorn
-    from src.interfaces.http import create_app, load_admin_token
+    from src.interfaces.http import create_app
 
-    load_admin_token(data_dir, ctx.obj.token)
-    if not ctx.obj.token:
-        typer.echo(f"Administrator credential file: {(data_dir / 'admin.token').resolve()}", err=True)
-    uvicorn.run(create_app(data_dir, admin_token=ctx.obj.token, secure_cookies=secure_cookies,
+    uvicorn.run(create_app(data_dir,
                           frontend_dir=frontend_dir, max_online=max_online, login_concurrency=login_concurrency),
                 host=host, port=port, workers=1, timeout_graceful_shutdown=10)
 
@@ -366,11 +353,8 @@ def logs_show(ctx: typer.Context, task_id: str):
 
 
 async def _follow(options: Options, task_id: str | None):
-    if not options.token:
-        raise ValueError("Set AOLA_ADMIN_TOKEN or use --token to authenticate")
-    headers = {"Authorization": f"Bearer {options.token}"}
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=45)
-    async with aiohttp.ClientSession(headers=headers, trust_env=False, timeout=timeout) as client:
+    async with aiohttp.ClientSession(trust_env=False, timeout=timeout) as client:
         async with client.get(options.url + "/api/v1/events",
                               params={"task_id": task_id} if task_id else None) as response:
             if response.status >= 400:

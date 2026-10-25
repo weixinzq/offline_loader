@@ -5,17 +5,13 @@ import TaskDetail from './components/TaskDetail.vue'
 import AccountPagination from './components/AccountPagination.vue'
 import EgressGroups from './components/EgressGroups.vue'
 import { useAccountPagination } from './accountPagination'
-import { ApiError, request, send } from './api'
+import { request, send } from './api'
 import { accountBody, isActive, label, time, tone } from './presentation'
-import type { Account, AccountImportResult, EgressGroup, LogEntry, Script, Session, TaskRecord } from './types'
+import type { Account, AccountImportResult, EgressGroup, LogEntry, Script, Session, TaskClearResult, TaskRecord } from './types'
 
 type Page = 'accounts' | 'sessions' | 'tasks' | 'compose' | 'egress'
 const page = ref<Page>('accounts')
-const authenticated = ref(false)
 const booting = ref(true)
-const token = ref('')
-const signingIn = ref(false)
-const loginError = ref('')
 const error = ref('')
 const success = ref('')
 const refreshing = ref(false)
@@ -25,6 +21,8 @@ const accounts = ref<Account[]>([])
 const sessions = ref<Session[]>([])
 const scripts = ref<Script[]>([])
 const tasks = ref<TaskRecord[]>([])
+const cancellingIds = ref<string[]>([])
+const clearedTaskIds = new Set<string>()
 const groups = ref<EgressGroup[]>([])
 const assignment = ref('__choose__')
 const groupsById = computed(() => new Map(groups.value.map(group => [group.group_id, group.name])))
@@ -51,14 +49,12 @@ let pendingLogs: LogEntry[] = []
 let resyncTimer: ReturnType<typeof setInterval> | undefined
 let detailSequence = 0
 let selectedTaskId: string | null = null
-let authEpoch = 0
-let authChecking = false
-let lastAuthCheck = 0
 let refreshPending = false
 let unmounted = false
 
 const readyCount = computed(() => sessions.value.filter(s => s.state === 'ready').length)
 const activeCount = computed(() => tasks.value.filter(t => isActive(t.state)).length)
+const finishedCount = computed(() => tasks.value.filter(t => !isActive(t.state)).length)
 const allSelected = computed(() => accounts.value.length > 0 && selectedIds.value.length === accounts.value.length)
 const sessionsById = computed(() => new Map(sessions.value.map(session => [session.account_id, session])))
 const sessionOf = (id: string) => sessionsById.value.get(id)
@@ -70,25 +66,8 @@ function clearPendingEvents() {
   eventTimer = undefined
   pendingSessions.clear(); pendingTasks.clear(); pendingLogs = []
 }
-function clearSession() {
-  ++authEpoch; ++detailSequence
-  selectedTaskId = null
-  authenticated.value = false; stream?.close(); stream = undefined
-  clearPendingEvents()
-  if (refreshTimer) clearTimeout(refreshTimer)
-  if (resyncTimer) clearInterval(resyncTimer)
-  resyncTimer = undefined
-  refreshTimer = undefined; refreshPending = false
-  selectedTask.value = null; accounts.value = []; sessions.value = []; tasks.value = []; scripts.value = []
-  selectedIds.value = []; token.value = ''; logs.value = []; importReport.value = null
-  groups.value = []; assignment.value = '__choose__'
-  editAccount.value = undefined; form.value.password = ''; detailLoading.value = false
-}
-
 function fail(cause: unknown) {
-  if (cause instanceof ApiError && cause.status === 401) {
-    clearSession(); loginError.value = '会话已失效，请重新登录。'
-  } else error.value = cause instanceof Error ? cause.message : '操作失败，请重试'
+  error.value = cause instanceof Error ? cause.message : '操作失败，请重试'
 }
 async function loadDetail(taskId: string, quiet = false) {
   selectedTaskId = taskId
@@ -99,7 +78,7 @@ async function loadDetail(taskId: string, quiet = false) {
       request<TaskRecord>(`/tasks/${encodeURIComponent(taskId)}`),
       request<LogEntry[]>(`/tasks/${encodeURIComponent(taskId)}/logs?after=${quiet ? logs.value.at(-1)?.id ?? 0 : 0}&limit=250`),
     ])
-    if (sequence === detailSequence && authenticated.value && !unmounted) {
+    if (sequence === detailSequence && !unmounted) {
       selectedTask.value = task
       if (quiet) {
         const existing = new Set(logs.value.map(entry => entry.id))
@@ -112,33 +91,33 @@ async function loadDetail(taskId: string, quiet = false) {
   finally { if (sequence === detailSequence) detailLoading.value = false }
 }
 async function refresh() {
-  if (!authenticated.value || unmounted) return
+  if (unmounted) return
   if (refreshing.value) { refreshPending = true; return }
-  const epoch = authEpoch
   refreshing.value = true
   try {
     const [accountData, sessionData, taskData, scriptData, groupData] = await Promise.all([
       request<Account[]>('/accounts'), request<Session[]>('/sessions'), request<TaskRecord[]>('/tasks'), request<Script[]>('/scripts'),
       request<EgressGroup[]>('/egress-groups'),
     ])
-    if (epoch !== authEpoch || !authenticated.value || unmounted) return
-    accounts.value = accountData; sessions.value = sessionData; tasks.value = taskData; scripts.value = scriptData
+    if (unmounted) return
+    accounts.value = accountData; sessions.value = sessionData
+    tasks.value = taskData.filter(task => !clearedTaskIds.has(task.task_id)); scripts.value = scriptData
     groups.value = groupData
     const accountIds = new Set(accountData.map(account => account.account_id))
     selectedIds.value = selectedIds.value.filter(id => accountIds.has(id))
     if (selectedTaskId) await loadDetail(selectedTaskId, true)
-  } catch (cause) { if (epoch === authEpoch) fail(cause) } finally {
+  } catch (cause) { if (!unmounted) fail(cause) } finally {
     refreshing.value = false
     if (refreshPending) { refreshPending = false; scheduleRefresh() }
   }
 }
 function scheduleRefresh() {
-  if (refreshTimer || !authenticated.value || unmounted) return
+  if (refreshTimer || unmounted) return
   refreshTimer = setTimeout(() => { refreshTimer = undefined; void refresh() }, 200)
 }
 function flushEvents() {
   eventTimer = undefined
-  if (!authenticated.value || unmounted) { clearPendingEvents(); return }
+  if (unmounted) { clearPendingEvents(); return }
   if (pendingSessions.size) {
     const known = new Set(sessions.value.map(session => session.account_id))
     sessions.value = sessions.value.map(session => pendingSessions.get(session.account_id) ?? session)
@@ -164,16 +143,18 @@ function flushEvents() {
   pendingLogs = []
 }
 function handleEvent(event: MessageEvent<string>) {
-  if (!authenticated.value || unmounted) return
+  if (unmounted) return
   try {
     const envelope = JSON.parse(event.data)
     const kind = String(envelope.event || event.type).split('.')[0]
     if (kind === 'session' && envelope.data?.state && envelope.data?.account_id) {
       const session = envelope.data as Session
       pendingSessions.set(session.account_id, session)
+    } else if (kind === 'task' && Array.isArray(envelope.data?.deleted_task_ids)) {
+      removeClearedTasks(envelope.data.deleted_task_ids)
     } else if (kind === 'task' && envelope.data?.state && envelope.data?.task_id) {
       const task = envelope.data as TaskRecord
-      pendingTasks.set(task.task_id, task)
+      if (!clearedTaskIds.has(task.task_id)) pendingTasks.set(task.task_id, task)
     } else if ((kind === 'log' || envelope.event === 'task.log') && envelope.data?.id) {
       const entry = envelope.data as LogEntry
       if (entry.task_id === selectedTaskId) {
@@ -187,20 +168,12 @@ function handleEvent(event: MessageEvent<string>) {
     }
   } catch { scheduleRefresh() }
 }
-async function checkStreamAuth() {
-  if (authChecking || Date.now() - lastAuthCheck < 10000) return
-  authChecking = true; lastAuthCheck = Date.now()
-  const epoch = authEpoch
-  try { await request('/auth/session') }
-  catch (cause) { if (epoch === authEpoch && cause instanceof ApiError && cause.status === 401) fail(cause) }
-  finally { authChecking = false }
-}
 function connectEvents() {
-  if (!authenticated.value || unmounted) return
+  if (unmounted) return
   stream?.close(); streamState.value = 'connecting'
   stream = new EventSource('/api/v1/events', { withCredentials: true })
   stream.onopen = () => { streamState.value = 'connected'; void refresh() }
-  stream.onerror = () => { streamState.value = 'reconnecting'; void checkStreamAuth() }
+  stream.onerror = () => { streamState.value = 'reconnecting' }
   stream.onmessage = handleEvent
   for (const name of ['session', 'task', 'log', 'account', 'session.updated', 'task.updated', 'task.log']) {
     stream.addEventListener(name, handleEvent as EventListener)
@@ -208,21 +181,6 @@ function connectEvents() {
   if (!resyncTimer) resyncTimer = setInterval(() => {
     if (document.visibilityState === 'visible') void refresh()
   }, 30000)
-}
-async function signIn() {
-  signingIn.value = true; loginError.value = ''
-  try {
-    await send('/auth/session', { token: token.value })
-    ++authEpoch; token.value = ''; authenticated.value = true; error.value = ''; success.value = ''
-    await refresh(); if (authenticated.value) connectEvents()
-  } catch (cause) { loginError.value = cause instanceof Error ? cause.message : '登录失败' }
-  finally { signingIn.value = false }
-}
-async function signOut() {
-  try {
-    await request('/auth/session', { method: 'DELETE' })
-    clearSession(); loginError.value = ''; error.value = ''; success.value = ''
-  } catch (cause) { fail(cause) }
 }
 function toggleAll(event: Event) {
   selectedIds.value = (event.target as HTMLInputElement).checked ? accounts.value.map(a => a.account_id) : []
@@ -272,11 +230,27 @@ async function sessionAction(operation: 'connect' | 'reconnect' | 'disconnect') 
 async function taskCreated(taskId: string) {
   page.value = 'tasks'; success.value = '任务已提交，后台将继续执行。'; await refresh(); await loadDetail(taskId)
 }
-async function cancelTask() {
-  if (!selectedTask.value) return
-  action.value = 'cancel'
-  try { await send(`/tasks/${encodeURIComponent(selectedTask.value.task_id)}/cancel`); await refresh() }
-  catch (cause) { fail(cause) } finally { action.value = '' }
+async function cancelTask(taskId: string) {
+  if (cancellingIds.value.includes(taskId)) return
+  cancellingIds.value.push(taskId)
+  try { await send(`/tasks/${encodeURIComponent(taskId)}/cancel`); await refresh() }
+  catch (cause) { fail(cause) }
+  finally { cancellingIds.value = cancellingIds.value.filter(id => id !== taskId) }
+}
+function removeClearedTasks(taskIds: string[]) {
+  for (const id of taskIds) { clearedTaskIds.add(id); pendingTasks.delete(id) }
+  tasks.value = tasks.value.filter(task => !clearedTaskIds.has(task.task_id))
+  pendingLogs = pendingLogs.filter(entry => !clearedTaskIds.has(entry.task_id ?? ''))
+  if (selectedTaskId && clearedTaskIds.has(selectedTaskId)) closeDetail()
+}
+async function clearFinishedTasks() {
+  action.value = 'clear'; error.value = ''
+  try {
+    const result = await request<TaskClearResult>('/tasks', { method: 'DELETE' })
+    removeClearedTasks(result.task_ids)
+    success.value = `已清除 ${result.deleted_count} 条已结束任务记录。`
+    await refresh()
+  } catch (cause) { fail(cause) } finally { action.value = '' }
 }
 async function assignGroup() {
   if (assignment.value === '__choose__' || !selectedIds.value.length) return
@@ -296,7 +270,7 @@ async function loadMoreLogs() {
   const after = logs.value.at(-1)?.id ?? 0
   try {
     const entries = await request<LogEntry[]>(`/tasks/${encodeURIComponent(taskId)}/logs?after=${after}&limit=250`)
-    if (sequence === detailSequence && authenticated.value && !unmounted) {
+    if (sequence === detailSequence && !unmounted) {
       const existing = new Set(logs.value.map(entry => entry.id))
       logs.value.push(...entries.filter(entry => !existing.has(entry.id)))
       if (logs.value.length > 2000) logs.value.splice(0, logs.value.length - 2000)
@@ -308,23 +282,18 @@ function visibilityRefresh() { if (document.visibilityState === 'visible') void 
 onMounted(async () => {
   document.addEventListener('visibilitychange', visibilityRefresh)
   try {
-    await request('/auth/session')
-    if (unmounted) return
-    authenticated.value = true; await refresh(); if (authenticated.value) connectEvents()
+    await refresh()
+    if (!unmounted) connectEvents()
   }
-  catch (cause) { if (!unmounted && !(cause instanceof ApiError && cause.status === 401)) fail(cause) }
   finally { booting.value = false }
 })
-onBeforeUnmount(() => { unmounted = true; ++detailSequence; ++authEpoch; stream?.close(); clearPendingEvents(); if (refreshTimer) clearTimeout(refreshTimer); if (resyncTimer) clearInterval(resyncTimer); document.removeEventListener('visibilitychange', visibilityRefresh) })
+onBeforeUnmount(() => { unmounted = true; ++detailSequence; stream?.close(); clearPendingEvents(); if (refreshTimer) clearTimeout(refreshTimer); if (resyncTimer) clearInterval(resyncTimer); document.removeEventListener('visibilitychange', visibilityRefresh) })
 </script>
 
 <template>
   <div v-if="booting" class="boot-screen"><span class="brand-mark">A</span><p>正在连接工作台…</p></div>
-  <main v-else-if="!authenticated" class="login-shell">
-    <section class="login-card"><div class="brand-mark">A</div><p class="eyebrow">AOLA WORKSPACE</p><h1>连接你的工作台</h1><p class="muted">账号、在线会话与任务，统一管理。</p><form @submit.prevent="signIn"><label class="field">管理员凭据<input v-model="token" type="password" autocomplete="current-password" required autofocus placeholder="输入服务端配置的管理员凭据" /></label><p v-if="loginError" class="danger-text" role="alert">{{ loginError }}</p><p v-if="error" class="danger-text" role="alert">{{ error }}</p><button type="submit" class="button primary full-width" :disabled="signingIn || !token">{{ signingIn ? '连接中…' : '进入工作台' }} <span>→</span></button></form><p class="login-footnote">登录后建立浏览器会话，凭据不会保存在本地。</p></section><p class="login-caption">让每一次操作都有清晰的结果。</p>
-  </main>
   <div v-else class="workspace">
-    <aside class="sidebar"><a href="#" class="brand" @click.prevent="page = 'accounts'"><span class="brand-mark">A</span><span>奥拉工作台<small>AOLA WORKSPACE</small></span></a><p class="nav-label">工作空间</p><nav><button :class="{ active: page === 'accounts' }" @click="page = 'accounts'"><span>▤</span>账号管理<small>{{ accounts.length }}</small></button><button :class="{ active: page === 'sessions' }" @click="page = 'sessions'"><span>◉</span>在线会话<small>{{ readyCount }}</small></button><button :class="{ active: page === 'tasks' }" @click="page = 'tasks'"><span>☷</span>任务记录<small v-if="activeCount">{{ activeCount }}</small></button><button :class="{ active: page === 'compose' }" @click="page = 'compose'"><span>＋</span>编排任务</button><button :class="{ active: page === 'egress' }" @click="page = 'egress'"><span>⇄</span>出口分组<small>{{ groups.length }}</small></button></nav><div class="sidebar-bottom"><div class="connection-status"><i :class="{ live: streamState === 'connected' }"></i>{{ streamState === 'connected' ? '实时更新已连接' : streamState === 'reconnecting' ? '连接恢复中…' : '正在连接实时更新…' }}</div><button class="text-button" @click="signOut">退出登录</button></div></aside>
+    <aside class="sidebar"><a href="#" class="brand" @click.prevent="page = 'accounts'"><span class="brand-mark">A</span><span>奥拉工作台<small>AOLA WORKSPACE</small></span></a><p class="nav-label">工作空间</p><nav><button :class="{ active: page === 'accounts' }" @click="page = 'accounts'"><span>▤</span>账号管理<small>{{ accounts.length }}</small></button><button :class="{ active: page === 'sessions' }" @click="page = 'sessions'"><span>◉</span>在线会话<small>{{ readyCount }}</small></button><button :class="{ active: page === 'tasks' }" @click="page = 'tasks'"><span>☷</span>任务记录<small v-if="activeCount">{{ activeCount }}</small></button><button :class="{ active: page === 'compose' }" @click="page = 'compose'"><span>＋</span>编排任务</button><button :class="{ active: page === 'egress' }" @click="page = 'egress'"><span>⇄</span>出口分组<small>{{ groups.length }}</small></button></nav><div class="sidebar-bottom"><div class="connection-status"><i :class="{ live: streamState === 'connected' }"></i>{{ streamState === 'connected' ? '实时更新已连接' : streamState === 'reconnecting' ? '连接恢复中…' : '正在连接实时更新…' }}</div></div></aside>
     <div class="main-shell"><header class="topbar"><span>统一后台 <span class="separator">/</span> {{ { accounts: '账号管理', sessions: '在线会话', tasks: '任务记录', compose: '编排任务', egress: '出口分组' }[page] }}</span><button class="text-button" :disabled="refreshing" @click="refresh">{{ refreshing ? '刷新中…' : '↻ 刷新' }}</button></header><main class="main-content">
       <div v-if="error" class="notice error global-notice" role="alert"><span>{{ error }}</span><button class="icon-button" aria-label="关闭错误提示" @click="error = ''">×</button></div><div v-if="success" class="notice success global-notice" role="status"><span>{{ success }}</span><button class="icon-button" aria-label="关闭成功提示" @click="success = ''">×</button></div>
       <template v-if="page === 'accounts' || page === 'sessions'">
@@ -340,12 +309,15 @@ onBeforeUnmount(() => { unmounted = true; ++detailSequence; ++authEpoch; stream?
       <EgressGroups v-else-if="page === 'egress'" :groups="groups" @changed="refresh" @failure="fail" />
       <TaskComposer v-else-if="page === 'compose'" :accounts="accounts" :sessions="sessions" :scripts="scripts" :selected-ids="selectedIds" @created="taskCreated" @failure="fail" />
       <template v-else-if="page === 'tasks'">
-        <div class="page-heading"><div><p class="eyebrow">TASKS</p><h1>任务记录</h1><p>查看执行进度、逐账号结果与后台日志。</p></div><button class="button primary" @click="page = 'compose'">＋ 编排任务</button></div>
-        <section class="panel"><div class="panel-heading"><h2>全部任务</h2><span class="muted">{{ tasks.length }} 项</span></div><div class="table-scroll"><table><thead><tr><th>任务</th><th>状态</th><th>创建时间</th><th>账号数</th><th></th></tr></thead><tbody><tr v-for="task in tasks" :key="task.task_id" :class="{ selected: selectedTask?.task_id === task.task_id }"><td><strong>{{ taskKind(task) }}</strong><small class="mono">{{ task.task_id.slice(0, 12) }}</small></td><td><span class="badge" :class="task.state === 'succeeded' && task.account_results.some(row => row.skipped_repetitions) ? 'working' : tone(task.state)">{{ task.state === 'succeeded' && task.account_results.some(row => row.skipped_repetitions) ? '完成，含跳过' : label(task.state) }}</span></td><td>{{ time(task.created_at) }}</td><td>{{ task.account_results.length }}</td><td class="align-right"><button class="text-button" @click="loadDetail(task.task_id)">查看详情 →</button></td></tr><tr v-if="!tasks.length"><td colspan="5" class="empty"><h3>还没有任务</h3><p>连接账号或编排执行步骤后，记录会显示在这里。</p></td></tr></tbody></table></div></section>
-        <p v-if="detailLoading" class="muted loading-note" role="status">正在读取任务详情…</p><TaskDetail v-if="selectedTask" :task="selectedTask" :logs="logs" :more-logs="moreLogs" :log-loading="logLoading" @more-logs="loadMoreLogs" :accounts="accounts" :cancelling="action === 'cancel'" @close="closeDetail" @cancel="cancelTask" />
+        <div class="page-heading"><div><p class="eyebrow">TASKS</p><h1>任务记录</h1><p>查看执行进度、逐账号结果与后台日志。</p></div><div class="button-row"><button class="button secondary" :disabled="!finishedCount || !!action" @click="clearFinishedTasks">{{ action === 'clear' ? '清除中…' : '清除已结束任务' }}</button><button class="button primary" @click="page = 'compose'">＋ 编排任务</button></div></div>
+        <section class="panel"><div class="panel-heading"><h2>全部任务</h2><span class="muted">{{ tasks.length }} 项</span></div><div class="table-scroll"><table><thead><tr><th>任务</th><th>状态</th><th>创建时间</th><th>账号数</th><th></th></tr></thead><tbody><tr v-for="task in tasks" :key="task.task_id" :class="{ selected: selectedTask?.task_id === task.task_id }"><td><strong>{{ taskKind(task) }}</strong><small class="mono">{{ task.task_id.slice(0, 12) }}</small></td><td><span class="badge" :class="task.state === 'succeeded' && task.account_results.some(row => row.skipped_repetitions) ? 'working' : tone(task.state)">{{ task.state === 'succeeded' && task.account_results.some(row => row.skipped_repetitions) ? '完成，含跳过' : label(task.state) }}</span></td><td>{{ time(task.created_at) }}</td><td>{{ task.account_results.length }}</td><td class="align-right"><div class="button-row task-row-actions"><button v-if="isActive(task.state)" class="button danger small" :disabled="cancellingIds.includes(task.task_id) || task.state === 'cancelling' && task.error?.code !== 'cleanup_failed'" @click="cancelTask(task.task_id)">{{ cancellingIds.includes(task.task_id) ? '取消中…' : task.error?.code === 'cleanup_failed' ? '重试取消' : task.state === 'cancelling' ? '取消中…' : '取消任务' }}</button><button class="text-button" @click="loadDetail(task.task_id)">查看详情 →</button></div></td></tr><tr v-if="!tasks.length"><td colspan="5" class="empty"><h3>还没有任务</h3><p>连接账号或编排执行步骤后，记录会显示在这里。</p></td></tr></tbody></table></div></section>
+        <p v-if="detailLoading" class="muted loading-note" role="status">正在读取任务详情…</p><TaskDetail v-if="selectedTask" :task="selectedTask" :logs="logs" :more-logs="moreLogs" :log-loading="logLoading" @more-logs="loadMoreLogs" :accounts="accounts" :cancelling="cancellingIds.includes(selectedTask.task_id)" @close="closeDetail" @cancel="cancelTask(selectedTask.task_id)" />
       </template>
     </main></div>
     <div v-if="editAccount !== undefined" class="modal-backdrop" @click.self="closeAccount"><section class="modal panel" role="dialog" aria-modal="true" aria-labelledby="account-dialog-title"><div class="panel-heading"><h2 id="account-dialog-title">{{ editAccount ? '编辑账号' : '添加账号' }}</h2><button class="icon-button" aria-label="关闭账号编辑" @click="closeAccount">×</button></div><form @submit.prevent="saveAccount"><label class="field">备注名称<input v-model="form.label" required maxlength="120" autocomplete="off" placeholder="例如：主账号" /></label><label class="field">登录账号<input v-model="form.account" required autocomplete="off" /></label><label class="field">{{ editAccount ? '新密码（留空保留原密码）' : '登录密码' }}<input v-model="form.password" type="password" :required="!editAccount" autocomplete="new-password" /></label><div class="field-row"><label class="field">角色 ID<input v-model.number="form.char_id" type="number" min="0" required /></label><label class="field">区服序号<input v-model.number="form.zone_index" type="number" min="0" required /></label></div><p v-if="formError" class="danger-text" role="alert">{{ formError }}</p><div class="modal-actions"><button type="button" class="button secondary" :disabled="action === 'save'" @click="closeAccount">取消</button><button type="submit" class="button primary" :disabled="action === 'save'">{{ action === 'save' ? '保存中…' : '保存账号' }}</button></div></form></section></div>
   </div>
 </template>
 
+<style scoped>
+.task-row-actions { justify-content: flex-end; white-space: nowrap; }
+</style>
