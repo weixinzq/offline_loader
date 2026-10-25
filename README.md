@@ -41,7 +41,6 @@ cd ..
 python cli_main.py serve
 ```
 
-打开网页即可使用，无需管理员 token 或登录流程，CLI 也无需设置凭据。账号密码不会由账号查询接口返回。
 
 ```bash
 python cli_main.py --help
