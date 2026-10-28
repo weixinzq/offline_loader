@@ -1,12 +1,12 @@
 """Find a storage entry and send cultivation messages using its i value."""
 from __future__ import annotations
 
+from src.game.pets.storage import find_storage_i
 from src.messaging.dispatcher import SendResult, execute_messages
 from src.messaging.parser import SendMessage
 
 SCRIPT_NAME = "仓库亚比查询"
 SCRIPT_DESCRIPTION = "按 r 查询首条仓库记录"
-RESPONSE_TIMEOUT_SECONDS = 30.0
 
 def cultivation_messages(i: int) -> tuple[SendMessage, ...]:
     # 直接在下面逐条修改消息；需要当前亚比编号的位置直接填写 i。
@@ -53,43 +53,6 @@ def cultivation_messages(i: int) -> tuple[SendMessage, ...]:
         SendMessage(42, "EU250926_upgrade", {"index": 0, "type": 0, "petId": i}),
         SendMessage(42, "SA231229_sl", {"mt": 1, "ids": f"[{i},1,2,{i},1,2,3,4,5]"}),
     )
-
-
-async def find_storage_i(context, r: int) -> int:
-    """Return i from the first entry whose r matches; raise if not found."""
-    if type(r) is not int:
-        raise ValueError("参数 r 必须是整数，例如 {\"r\": 6000}")
-
-    await context.wait_for_player_initialization()
-    subscription = context.messages.subscribe()
-    try:
-        await context.socket.send_xt_message(
-            13, "1226", {
-                "label": [-1, -1, -1],
-                "stars": ["GQ"],
-                "order": 1,
-                "race": [],
-                "page": 1,
-                "kw": "5856",
-                "nsk": False,
-                "sys": "",
-                "elitePM": 0,
-                "loc": 10,
-                "asc": False,
-                "pmTypes": [-2],
-            },
-        )
-        response = await subscription.wait_for(
-            lambda message: message.get("_cmd") == "1226",
-            timeout=RESPONSE_TIMEOUT_SECONDS,
-        )
-    finally:
-        subscription.close()
-
-    for entry in response["storageList"]:
-        if entry["r"] == r:
-            return entry["i"]
-    raise ValueError(f"仓库第 1 页未找到 r={r} 的记录")
 
 
 async def run(context) -> tuple[SendResult, ...]:
