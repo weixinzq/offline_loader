@@ -178,6 +178,8 @@ class ServerProbeResult(BaseModel):
     state: str
     started_at: str | None = None
     finished_at: str | None = None
+    scheduled_at: str | None = None
+    start_before: str | None = None
     error: ErrorInfo | None = None
     flash: TransportProbeResult
     h5: TransportProbeResult

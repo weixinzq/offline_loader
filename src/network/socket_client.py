@@ -679,13 +679,35 @@ class GameSocket:
 
 
 
+async def _connect_tcp_with_retry(sock, host, port, timeout, window):
+    deadline = time.monotonic() + window
+    attempt = 0
+    while (remaining := deadline - time.monotonic()) > 0:
+        attempt += 1
+        print(f"[TCP] Attempt {attempt}, remaining={remaining:.3f}s")
+        try:
+            async with asyncio.timeout(remaining):
+                connected = await sock.connect_tcp(host, port, min(timeout, remaining))
+        except TimeoutError:
+            sock.disconnect_reason = "TCP 连接重试窗口已结束"
+            connected = False
+        if connected:
+            return True
+        await sock.close()
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            await asyncio.sleep(min(0.5, remaining))
+    return False
+
+
 async def login_and_connect(
     zone, user_id: str, session_id: str,
     timeout: float = 15.0,
     proxy_url: str | None = None,
     network_mode: str = "legacy",
+    tcp_retry_window: float | None = None,
 ) -> GameSocket | None:
-    """完整登录流程: TCP 或 WebSocket → 发送登录包 → 接收 logOK"""
+    """TCP/WSS login; a retry window selects TCP only and retries before sending login."""
     if network_mode == "system":
         sock = GameSocket(session_id, network_mode="system")
     else:
@@ -694,7 +716,9 @@ async def login_and_connect(
     try:
         # 策略 2: 原始 TCP (Flash port)
         tcp_port = zone.flash_port or zone.port
-        if await sock.connect_tcp(zone.host, tcp_port, timeout):
+        connected = (await _connect_tcp_with_retry(sock, zone.host, tcp_port, timeout, tcp_retry_window)
+                     if tcp_retry_window is not None else await sock.connect_tcp(zone.host, tcp_port, timeout))
+        if connected:
             resp = await sock.login(
                 f"{zone.zone_index} {zone.zone_name}",
                 user_id, session_id
@@ -703,6 +727,9 @@ async def login_and_connect(
                 retained = True
                 return sock
             await sock.close()
+
+        if tcp_retry_window is not None:
+            return None
 
         # 策略 1: WebSocket (H5 domain:port)
         if zone.domain and zone.port > 0:

@@ -586,6 +586,7 @@ export interface components {
             /** Status */
             status: string;
         };
+        JsonValue: unknown;
         /** LogEntry */
         LogEntry: {
             /** Id */
@@ -662,6 +663,10 @@ export interface components {
             kind: "script";
             /** Script Id */
             script_id: string;
+            /** Params */
+            params?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
         };
         /** ServerProbeResult */
         ServerProbeResult: {
@@ -680,6 +685,10 @@ export interface components {
             started_at?: string | null;
             /** Finished At */
             finished_at?: string | null;
+            /** Scheduled At */
+            scheduled_at?: string | null;
+            /** Start Before */
+            start_before?: string | null;
             error?: components["schemas"]["ErrorInfo"] | null;
             flash: components["schemas"]["TransportProbeResult"];
             h5: components["schemas"]["TransportProbeResult"];
@@ -896,6 +905,8 @@ export interface components {
             planned_at?: string | null;
             /** Probe Until */
             probe_until?: string | null;
+            /** Probe Staggered */
+            probe_staggered?: boolean | null;
         };
         /** TransportProbeResult */
         TransportProbeResult: {

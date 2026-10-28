@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from src.scripting.composer import execute_combination
@@ -62,7 +62,7 @@ class TaskService:
         if not spec.account_ids or len(set(spec.account_ids)) != len(spec.account_ids):
             raise ServiceError("invalid_accounts", "请选择不重复的目标账号")
         accounts = [self.store.get_account(account_id, private=True) for account_id in spec.account_ids]
-        if spec.kind == "server_probe":
+        if spec.kind == "server_probe" and not spec.probe_staggered:
             accounts = accounts[:len(spec.server_targets)]
         steps = ()
         if spec.kind in {"execute", "server_probe"}:
@@ -89,16 +89,24 @@ class TaskService:
                 int(target.flash_port > 0 and target.transport != "h5") +
                 int(target.h5_port > 0 and bool(target.domain) and target.transport != "flash")
                 for target in spec.server_targets)
+            if spec.probe_staggered:
+                result["max_transport_attempts"] *= len(accounts)
+                if result["effective_concurrency"] < len(accounts):
+                    raise ServiceError("capacity_exceeded", "错峰登录需要足够并发容量以避免排队改变启动时间")
         return result
 
     @staticmethod
     def _server_rows(spec, accounts):
+        targets = [spec.server_targets[0]] * len(accounts) if spec.probe_staggered else spec.server_targets
         return [{"target_index": index, "server": target.model_dump(),
                  "account_id": accounts[index % len(accounts)]["account_id"],
                  "egress_group_id": accounts[index % len(accounts)]["egress_group_id"],
                  "exit_ip": None, "state": "queued", "started_at": None, "finished_at": None,
-                 "error": None, "flash": transport_result(), "h5": transport_result()}
-                for index, target in enumerate(spec.server_targets)]
+                 "error": None, "flash": transport_result(), "h5": transport_result(),
+                 **({"scheduled_at": (spec.planned_at + timedelta(milliseconds=100 * index)).isoformat(),
+                     "start_before": (spec.planned_at + timedelta(milliseconds=100 * len(accounts))).isoformat()}
+                    if spec.probe_staggered else {})}
+                for index, target in enumerate(targets)]
 
     def _publish(self, run: _Run) -> None:
         self.store.save_task(run.record)
@@ -341,7 +349,8 @@ class TaskService:
                                                          attempts=run.spec.probe_attempts or 1,
                                                          window={"start": run.spec.planned_at.isoformat(),
                                                                  "until": run.spec.probe_until.isoformat()}
-                                                         if run.spec.probe_until else None)
+                                                         if run.spec.probe_until else None,
+                                                         start_at=row.get("scheduled_at"), start_before=row.get("start_before"))
                         if outcome.get("blocked_code"):
                             raise ServiceError(outcome["blocked_code"], "登录受到限制，停止本轮测试")
                         statuses = [outcome[name]["status"] for name in ("flash", "h5")]

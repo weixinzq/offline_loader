@@ -25,7 +25,8 @@ def run(file, output, at, request, *, clock=lambda: datetime.now(timezone.utc), 
     save("schedule.json", {"state": "waiting", "planned_at": at.isoformat()})
     print("Waiting until " + at.isoformat(), flush=True)
     # Prepare workers and check exits before a fixed one-second login window.
-    dispatch_at = at - timedelta(seconds=10) if body.get("probe_until") else at
+    prepare_seconds = 30 if body.get("probe_staggered") else 10 if body.get("probe_until") else 0
+    dispatch_at = at - timedelta(seconds=prepare_seconds)
     while (remaining := (dispatch_at - clock()).total_seconds()) > 0:
         sleep(min(remaining, 1))
     record = request("POST", "/tasks", body)

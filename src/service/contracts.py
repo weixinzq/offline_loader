@@ -6,7 +6,7 @@ from datetime import datetime
 from ipaddress import IPv4Address
 import re
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 
 class ServiceError(ValueError):
@@ -78,6 +78,7 @@ class MessagesStep(InputModel):
 class ScriptStepSpec(InputModel):
     kind: Literal["script"]
     script_id: str = Field(min_length=1)
+    params: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 StepSpec = Annotated[MessagesStep | ScriptStepSpec, Field(discriminator="kind")]
@@ -121,6 +122,7 @@ class TaskSpec(InputModel):
     probe_attempts: int | None = Field(default=None, ge=1, le=25, strict=True)
     planned_at: datetime | None = None
     probe_until: datetime | None = None
+    probe_staggered: bool | None = None
 
     @model_validator(mode="after")
     def validate_task(self):
@@ -153,4 +155,12 @@ class TaskSpec(InputModel):
                 raise ValueError("每秒测试必须明确区服和单一传输方式")
         elif (self.probe_attempts or 1) > 5:
             raise ValueError("普通服务器测试每种传输最多5次")
+        if self.probe_staggered:
+            if (self.kind != "server_probe" or self.planned_at is None or self.probe_until is not None
+                    or len(self.server_targets) != 1 or (self.probe_attempts or 1) != 1):
+                raise ValueError("错峰登录需要一个目标、计划时间、每账号一次且不能与重试窗口同时使用")
+            if len(self.account_ids) > 30 or self.concurrency < len(self.account_ids):
+                raise ValueError("错峰登录最多30个账号，并发容量必须覆盖所选账号")
+            if self.server_targets[0].zone_index is None or self.server_targets[0].transport is None:
+                raise ValueError("错峰登录必须明确区服和单一传输方式")
         return self

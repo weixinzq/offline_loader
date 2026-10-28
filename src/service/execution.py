@@ -1,5 +1,6 @@
 """Pure message preflight and registered script capabilities."""
 from dataclasses import asdict, replace
+from copy import deepcopy
 import json
 
 from src.messaging.dispatcher import validate_messages
@@ -48,10 +49,15 @@ class ScriptContext:
     Existing socket/messages properties are narrow adapters rather than the
     underlying socket or full AppContext. There is exactly one receive owner.
     """
-    def __init__(self, context):
+    def __init__(self, context, params=None):
         self._context = context
+        self._params = deepcopy(params) if params is not None else {}
         self.socket = ScriptSocket(context.socket)
         self.messages = ScriptMessages(context.messages)
+
+    @property
+    def params(self):
+        return deepcopy(self._params)
 
     @property
     def user_id(self):
@@ -131,8 +137,8 @@ class ScriptRegistry:
                     raise ServiceError("unknown_script", "专用脚本不存在")
                 script = self._scripts[step.script_id]
 
-                async def run(context, runner=script.run):
-                    return await runner(ScriptContext(context))
+                async def run(context, runner=script.run, params=deepcopy(step.params)):
+                    return await runner(ScriptContext(context, params))
 
                 result.append(ScriptStep(replace(script, run=run)))
         return tuple(result)

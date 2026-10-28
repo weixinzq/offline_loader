@@ -189,6 +189,7 @@ async def open_context(config: dict, *, interactive: bool = False) -> AppContext
         result.user_id,
         result.session_id,
         timeout=float(config.get("timeout", 2)),
+        tcp_retry_window=10.0,
         **({"network_mode": "system"} if config.get("network_mode") == "system" else {}),
         **({"proxy_url": config["proxy_url"]} if config.get("proxy_url") else {}),
     )

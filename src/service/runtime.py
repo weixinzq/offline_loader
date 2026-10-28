@@ -270,7 +270,8 @@ class SessionService:
             session.error = session.redactor.clean(exc)
             self._publish(session)
 
-    async def probe_server(self, task_id, account, target, timeout, outcome, *, steps=(), attempts=1, window=None):
+    async def probe_server(self, task_id, account, target, timeout, outcome, *, steps=(), attempts=1, window=None,
+                           start_at=None, start_before=None):
         if self._claims.get(account_identity(account)) != task_id or not account.get("egress_group_id"):
             raise ServiceError("account_busy", "探测任务没有代理测试账号的独占权", 409)
         self.egress.check(account["egress_group_id"], connecting=True)
@@ -285,7 +286,8 @@ class SessionService:
         log = lambda message: self.on_log(task_id, account["account_id"], message) if self.on_log else None
         # Reservations remain held until the worker acknowledges cleanup, including cancellation.
         async with self._login_slots:
-            await connection.probe_server(target, timeout, outcome, steps=steps, attempts=attempts, log=log, window=window)
+            await connection.probe_server(target, timeout, outcome, steps=steps, attempts=attempts, log=log, window=window,
+                                          start_at=start_at, start_before=start_before)
 
     async def connect(self, task_id: str, account: dict, *, temporary: bool, reconnect=False):
         # All batches and child processes share this login/initialization limit.

@@ -59,7 +59,8 @@ async def close_socket(socket, timeout):
         raise
 
 
-async def _probe_once(config, target, timeout, outcome, redactor, transport, steps, log, deadline=None):
+async def _probe_once(config, target, timeout, outcome, redactor, transport, steps, log, deadline=None,
+                      authentication_cache=None):
     """Fill partial results even on cancellation; never return credentials or raw replies."""
     outcome.update(flash=transport_result(), h5=transport_result())
     if not target["flash_port"]:
@@ -81,18 +82,23 @@ async def _probe_once(config, target, timeout, outcome, redactor, transport, ste
                 raise TimeoutError("测试窗口已结束")
             return min(timeout, remaining)
         try:
-            async with asyncio.timeout(phase_timeout()):
-                login = await http_login(config["account"], config["password"],
-                    char_id=config.get("char_id", 0), login_url=config.get("login_url"),
-                    register_url=config.get("register_url"), browser_verification=False,
-                    network_mode="system", timeout=timeout, diagnostic_dir=config.get("diagnostic_dir"))
+            cached = authentication_cache.pop("authenticated", None) if authentication_cache is not None else None
+            if cached:
+                login, authenticated_at = cached
+            else:
+                async with asyncio.timeout(phase_timeout()):
+                    login = await http_login(config["account"], config["password"],
+                        char_id=config.get("char_id", 0), login_url=config.get("login_url"),
+                        register_url=config.get("register_url"), browser_verification=False,
+                        network_mode="system", timeout=timeout, diagnostic_dir=config.get("diagnostic_dir"))
+                authenticated_at = now()
             row["stage_durations_ms"]["authenticate"] = round((monotonic() - stage_started) * 1000, 1)
             redactor.add(login.session_id)
             redactor.add(login.user_id)
             row["authentication_response"] = safe_response({
                 "success": login.success, "http_stage": login.http_stage,
                 "http_status": login.http_status, "blocked_reason": login.blocked_reason,
-                "error": login.error_msg}, redactor)
+                "error": login.error_msg, "reused": bool(cached), "authenticated_at": authenticated_at}, redactor)
             if not login.success:
                 code = blocked_code(login.blocked_reason)
                 row.update(status="authentication_failed", error=redactor.clean(login.error_msg))
@@ -119,6 +125,8 @@ async def _probe_once(config, target, timeout, outcome, redactor, transport, ste
                 continue
             row.update(zone_index=zone.zone_index, zone_name=zone.zone_name, stage="connect")
             stage_started = monotonic()
+            if authentication_cache is not None:
+                authentication_cache["authenticated"] = (login, authenticated_at)
             socket = GameSocket(login.session_id, network_mode="system")
             async with asyncio.timeout(phase_timeout()):
                 connected = await (socket.connect_tcp(server.host, server.flash_port, timeout)
@@ -131,6 +139,9 @@ async def _probe_once(config, target, timeout, outcome, redactor, transport, ste
             row["connected_at"] = now()
             row["stage"] = "login"
             stage_started = monotonic()
+            # Once a game login packet may be sent, do not assume its SID is reusable.
+            if authentication_cache is not None:
+                authentication_cache.clear()
             async with asyncio.timeout(phase_timeout()):
                 reply = await socket.login(f"{zone.zone_index} {zone.zone_name}", login.user_id, login.session_id)
             row["stage_durations_ms"]["login"] = round((monotonic() - stage_started) * 1000, 1)
@@ -222,6 +233,7 @@ async def probe_server(config, target, timeout, outcome, redactor, *, steps=(), 
         slot = 0
         start = datetime.fromisoformat(window["start"]) if window else None
         deadline = datetime.fromisoformat(window["until"]) if window else None
+        authentication_cache = {} if window else None
         if window:
             slot = max(0, math.ceil((datetime.now(timezone.utc) - start).total_seconds()))
             skipped.extend({"slot": missed, "scheduled_at": (start + timedelta(seconds=missed)).isoformat(),
@@ -240,7 +252,8 @@ async def probe_server(config, target, timeout, outcome, redactor, *, steps=(), 
             if log:
                 log(prefix + " 开始登录")
             try:
-                await _probe_once(config, target, timeout, current, redactor, transport, steps, log, deadline)
+                await _probe_once(config, target, timeout, current, redactor, transport, steps, log, deadline,
+                                  authentication_cache)
             finally:
                 if transport in current:
                     row = current[transport]

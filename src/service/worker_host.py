@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 from contextvars import ContextVar
+from datetime import datetime, timezone
 import ipaddress
 import json
 import logging
@@ -18,7 +19,7 @@ from src.service.execution import MessageService, ScriptRegistry
 from src.service.execution_runner import run_execution
 from src.service.runtime import Redactor
 from src.service.worker_process import actual_executable, bind_linux_parent
-from src.network.server_probe import probe_server
+from src.network.server_probe import probe_server, transport_result
 
 
 class WorkerHost:
@@ -74,6 +75,16 @@ class WorkerHost:
             config = dict(data["config"], network_mode="system", browser_verification=False)
             self.redactor.collect(config)
             try:
+                if data.get("start_at"):
+                    start = datetime.fromisoformat(data["start_at"])
+                    await asyncio.sleep(max(0, (start - datetime.now(timezone.utc)).total_seconds()))
+                    if datetime.now(timezone.utc) >= datetime.fromisoformat(data["start_before"]):
+                        outcome.update(flash=transport_result(), h5=transport_result())
+                        for name in ("flash", "h5"):
+                            outcome[name].update(status="missed_start" if name == data["target"]["transport"] else "not_selected",
+                                                 error="已超过允许的启动时窗" if name == data["target"]["transport"] else None)
+                        self.log("错峰登录已错过启动时窗，未发起游戏认证", account_id)
+                        return outcome
                 steps = self.registry.build_steps(TypeAdapter(list[StepSpec]).validate_python(data.get("steps", [])))
                 await probe_server(config, data["target"], data["timeout"], outcome, self.redactor,
                                    steps=steps, attempts=data.get("attempts", 1), log=self.log, window=data.get("window"))

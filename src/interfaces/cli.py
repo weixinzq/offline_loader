@@ -261,7 +261,7 @@ def servers_probe(ctx: typer.Context,
 def server_probe_csv(record):
     stream = io.StringIO(newline="")
     columns = ["task_id", "planned_at", "batch_started_at", "batch_finished_at", "target_index", "host",
-               "flash_port", "h5_port", "domain", "source_server_index", "account_id", "egress_group_id",
+               "flash_port", "h5_port", "domain", "source_server_index", "account_id", "egress_group_id", "scheduled_at", "start_before",
                "exit_ip", "transport", "status", "stage", "server_index", "zone_index", "zone_name",
                "started_at", "finished_at", "duration_ms", "authenticate_ms", "connect_ms", "login_ms",
                "connection_status", "login_status", "connected_at", "logged_in_at", "initialized_at",
@@ -273,7 +273,7 @@ def server_probe_csv(record):
         for transport in ("flash", "h5"):
             result = server[transport]
             row = {name: result.get(name) for name in columns if name in result}
-            row.update({name: server.get(name) for name in ("target_index", "account_id", "egress_group_id", "exit_ip")})
+            row.update({name: server.get(name) for name in ("target_index", "account_id", "egress_group_id", "exit_ip", "scheduled_at", "start_before")})
             row.update({name: server["server"][name] for name in ("host", "flash_port", "h5_port", "domain")})
             row.update(task_id=record["task_id"], planned_at=record.get("spec", {}).get("planned_at"),
                        batch_started_at=record.get("started_at"), batch_finished_at=record.get("finished_at"),

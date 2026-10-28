@@ -25,6 +25,23 @@ const messageDelay = ref(0.2)
 const steps = ref<Step[]>([])
 const text = ref('')
 const scriptId = ref('')
+const scriptParamsText = ref('')
+type ScriptParams = NonNullable<Extract<Step, { kind: 'script' }>['params']>
+const scriptParams = computed(() => {
+  try {
+    const params = scriptParamsText.value.trim() ? JSON.parse(scriptParamsText.value, (_key, value) => {
+      if (typeof value === 'number' && !Number.isFinite(value)) throw new Error('参数中的数字必须是有限值')
+      return value
+    }) : {}
+    if (params === null || typeof params !== 'object' || Array.isArray(params)) {
+      return { value: {} as ScriptParams, error: '脚本参数必须是 JSON 对象，例如 {"target_value": 10000}' }
+    }
+    return { value: params as ScriptParams, error: '' }
+  } catch {
+    return { value: {} as ScriptParams, error: '请填写有效的 JSON 对象，数字须为有限值；无参数可留空' }
+  }
+})
+watch(scriptId, () => { scriptParamsText.value = '' })
 const busy = ref('')
 const error = ref('')
 const validation = ref<TaskPreflight | null>(null)
@@ -73,7 +90,11 @@ async function readFile(event: Event) {
   input.value = ''
 }
 function addScript() {
-  if (scriptId.value) { steps.value.push({ kind: 'script', script_id: scriptId.value }); scriptId.value = '' }
+  if (!scriptId.value || scriptParams.value.error) return
+  const params = scriptParams.value.value
+  steps.value.push({ kind: 'script', script_id: scriptId.value,
+    ...(Object.keys(params).length ? { params } : {}) })
+  scriptId.value = ''; scriptParamsText.value = ''
 }
 function move(index: number, direction: number) {
   const step = steps.value.splice(index, 1)[0]
@@ -114,10 +135,10 @@ async function submit() {
     </section>
     <section class="panel">
       <div class="panel-heading"><h2>3. 执行步骤</h2><span class="muted">{{ steps.length }} 步</span></div>
-      <ol v-if="steps.length" class="step-list"><li v-for="(step, index) in steps" :key="index"><span class="step-number">{{ index + 1 }}</span><div><strong>{{ step.kind === 'messages' ? `发送 ${step.messages.length} 条消息` : scripts.find(s => s.script_id === step.script_id)?.name || step.script_id }}</strong><small>{{ step.kind === 'messages' ? step.messages.map(m => m.cmd).join(' · ') : '运行脚本' }}</small></div><div class="step-actions"><button type="button" class="icon-button" :disabled="index === 0" aria-label="上移步骤" @click="move(index, -1)">↑</button><button type="button" class="icon-button" :disabled="index === steps.length - 1" aria-label="下移步骤" @click="move(index, 1)">↓</button><button type="button" class="icon-button danger-text" aria-label="删除步骤" @click="steps.splice(index, 1)">×</button></div></li></ol>
+      <ol v-if="steps.length" class="step-list"><li v-for="(step, index) in steps" :key="index"><span class="step-number">{{ index + 1 }}</span><div><strong>{{ step.kind === 'messages' ? `发送 ${step.messages.length} 条消息` : scripts.find(s => s.script_id === step.script_id)?.name || step.script_id }}</strong><small>{{ step.kind === 'messages' ? step.messages.map(m => m.cmd).join(' · ') : Object.keys(step.params ?? {}).length ? `参数：${JSON.stringify(step.params)}` : '运行脚本（无参数）' }}</small></div><div class="step-actions"><button type="button" class="icon-button" :disabled="index === 0" aria-label="上移步骤" @click="move(index, -1)">↑</button><button type="button" class="icon-button" :disabled="index === steps.length - 1" aria-label="下移步骤" @click="move(index, 1)">↓</button><button type="button" class="icon-button danger-text" aria-label="删除步骤" @click="steps.splice(index, 1)">×</button></div></li></ol>
       <div v-else class="empty compact">添加消息或脚本，建立执行顺序。</div>
       <div class="step-editor"><label class="field">添加消息<textarea v-model="text" rows="7" placeholder="粘贴消息内容，或从本机文件读取" spellcheck="false"></textarea></label><div class="split-actions"><label class="button subtle file-button">读取文件<input type="file" accept=".txt,.json,.log" @change="readFile" /></label><button type="button" class="button secondary" :disabled="!text.trim() || !!busy" @click="parseMessages">{{ busy === 'parse' ? '解析中…' : '解析并添加' }}</button></div></div>
-      <div class="step-editor"><label class="field">添加脚本<select v-model="scriptId"><option value="">选择脚本</option><option v-for="script in scripts" :key="script.script_id" :value="script.script_id">{{ script.name }}</option></select></label><p v-if="scriptId" class="help">{{ scripts.find(s => s.script_id === scriptId)?.description }}</p><button type="button" class="button secondary" :disabled="!scriptId || !!busy" @click="addScript">添加脚本步骤</button></div>
+      <div class="step-editor"><label class="field">添加脚本<select v-model="scriptId"><option value="">选择脚本</option><option v-for="script in scripts" :key="script.script_id" :value="script.script_id">{{ script.name }}</option></select></label><p v-if="scriptId" class="help">{{ scripts.find(s => s.script_id === scriptId)?.description }}</p><label class="field">脚本参数（可选，JSON 对象）<textarea v-model="scriptParamsText" :disabled="!scriptId || !!busy" rows="3" placeholder='{"target_value": 10000}' spellcheck="false"></textarea></label><p class="help">不需要参数时留空，已有脚本无需修改。参数随本步骤保存，任务提交后固定。</p><p v-if="scriptId && scriptParams.error" class="danger-text" role="alert">{{ scriptParams.error }}</p><button type="button" class="button secondary" :disabled="!scriptId || !!busy || !!scriptParams.error" @click="addScript">添加脚本步骤</button></div>
     </section>
   </div>
   <div v-if="error" class="notice error" role="alert">{{ error }}</div>
