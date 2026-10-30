@@ -273,6 +273,7 @@ async def supervise(directory):
 
 
 def main(argv=None):
+    raise SystemExit("此独立连接入口已停用，请使用统一后台的网页或 CLI，通过 IP 池连接。")
     parser = argparse.ArgumentParser(description="配置驱动的多进程组合任务")
     sub = parser.add_subparsers(dest="command", required=True, metavar="{validate,start,status,stop}")
     for name in ("validate", "start"):

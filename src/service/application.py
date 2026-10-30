@@ -25,6 +25,7 @@ class Application:
                                        max_online=max_online, login_concurrency=login_concurrency)
         self.egress = EgressService(self.store, self.sessions, self.workers, self.events)
         self.sessions.egress = self.egress
+        self.workers.on_lost = self.egress.failed
         self.accounts = AccountService(self.store, self.sessions, self.events, self.egress)
         self.tasks = TaskService(self.store, self.sessions, self.scripts, self.messages, self.events, executor=executor)
         self._started = False

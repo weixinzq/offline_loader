@@ -19,6 +19,7 @@ import asyncio
 import logging
 import struct
 import time
+import xml.etree.ElementTree as ET
 from typing import Any
 
 from src.config import UpCmd, DownCmd, MSG_TYPE_SYS, MSG_TYPE_EXT
@@ -42,6 +43,29 @@ _pack_short = pack_short
 _pack_int = pack_int
 
 logger = logging.getLogger(__name__)
+
+
+def _policy_allows_game_socket(policy: bytes, port: int) -> bool:
+    try:
+        root = ET.fromstring(policy)
+    except ET.ParseError:
+        return False
+    if root.tag != 'cross-domain-policy':
+        return False
+    origin = 'aola.100bt.com'
+    for rule in root.findall('allow-access-from'):
+        domain = rule.get('domain', '').lower()
+        if not (domain in {'*', origin} or (domain.startswith('*.') and origin.endswith(domain[1:]))):
+            continue
+        for allowed in rule.get('to-ports', '').split(','):
+            allowed = allowed.strip()
+            if allowed == '*' or (allowed.isdigit() and int(allowed) == port):
+                return True
+            bounds = allowed.split('-')
+            if len(bounds) == 2 and all(value.isdigit() for value in bounds):
+                if int(bounds[0]) <= port <= int(bounds[1]):
+                    return True
+    return False
 
 
 class GameSocket:
@@ -102,16 +126,26 @@ class GameSocket:
             self.disconnect_reason = ""
             self.active_room_id = -1
             self.active_room_name = ""
+            print(f"[TCP] Transport established to {host}:{port}")
             # 读取 Flash 安全策略文件
             try:
                 policy = bytearray()
-                while True:
-                    b = await asyncio.wait_for(self._reader.readexactly(1), timeout=2.0)
-                    if b[0] == 0: break
-                    policy.append(b[0])
+                async with asyncio.timeout(0.2):
+                    while True:
+                        b = await self._reader.readexactly(1)
+                        if b[0] == 0: break
+                        policy.append(b[0])
+                if not _policy_allows_game_socket(bytes(policy), port):
+                    self.disconnect_reason = "TCP 安全策略无效或未允许当前游戏域名及端口"
+                    await self.close()
+                    print(f"[TCP] Connection failed: {self.disconnect_reason}")
+                    return False
                 print(f"[TCP] Policy: {policy.decode('ascii', errors='replace')[:200]}")
             except asyncio.TimeoutError:
-                print("[TCP] Policy read timeout — continuing")
+                self.disconnect_reason = "TCP 安全策略等待超过 0.2 秒"
+                await self.close()
+                print(f"[TCP] Connection failed: {self.disconnect_reason}")
+                return False
             print(f"[TCP] Connected to {host}:{port}")
             return True
         except asyncio.IncompleteReadError as e:
@@ -541,7 +575,16 @@ class GameSocket:
         print(f"[LOGIN] Credential loaded (len={len(session_id)})")
         await self._send_raw(packet)
 
-        resp, raw = await self._recv_any_packet(timeout=15.0)
+        deadline = asyncio.get_running_loop().time() + 15.0
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                resp, raw = None, None
+                break
+            resp, raw = await self._recv_any_packet(timeout=remaining)
+            if not isinstance(resp, dict) or resp.get('_cmd') != 'honorMsgDispatch':
+                break
+            print("[LOGIN] Honor notification received; waiting for login response")
         if resp is None and raw is None:
             print("[LOGIN] No response (timeout)")
             return None
@@ -723,7 +766,7 @@ async def login_and_connect(
                 f"{zone.zone_index} {zone.zone_name}",
                 user_id, session_id
             )
-            if resp is not None:
+            if resp is not None and (tcp_retry_window is None or resp.get('_cmd') == 'logOK'):
                 retained = True
                 return sock
             await sock.close()

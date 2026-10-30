@@ -7,7 +7,7 @@ from src.messaging.parser import SendMessage
 
 SCRIPT_NAME = "仓库亚比查询"
 SCRIPT_DESCRIPTION = "按 r 查询首条仓库记录"
-
+#send={"id":15,"param":{"lv":false,"ap":false,"petId":8,"equIds":[25,26,27,28]},"cmd":"54_27"}|
 def cultivation_messages(i: int) -> tuple[SendMessage, ...]:
     # 直接在下面逐条修改消息；需要当前亚比编号的位置直接填写 i。
     return (
@@ -48,14 +48,27 @@ def cultivation_messages(i: int) -> tuple[SendMessage, ...]:
         SendMessage(42, "EU250926_upgrade", {"index": 0, "petId": i, "type": 0}),
         SendMessage(42, "LBF260918_1", {}),
         SendMessage(42, "74_1", {"eventId": 48431}),
+        SendMessage(42, "SA231229_sl", {"mt": 1, "ids": f"[{i},1,2,{i},1,2,3,4,5]"}),
+        SendMessage(15,"54_22",{"handler":"HKR200306","chapter":3,"pos":0,"type":99}),
+        SendMessage(id = 13, cmd = "1409", param={"useAiType":1}),
+        SendMessage(id=-1, cmd="#wait", param={}),
+        SendMessage(15,"54_22",{"handler":"HKR200306","chapter":3,"pos":1,"type":99}),
+        SendMessage(id = 13, cmd = "1409", param={"useAiType":1}),
+        SendMessage(id=-1, cmd="#wait", param={}),
+        SendMessage(15,"54_22",{"handler":"HKR200306","chapter":3,"pos":2,"type":99}),
+        SendMessage(id = 13, cmd = "1409", param={"useAiType":1}),
+        SendMessage(id=-1, cmd="#wait", param={}),
+        SendMessage(15,"54_22",{"handler":"HKR200306","chapter":3,"pos":3,"type":99}),
+        SendMessage(id = 13, cmd = "1409", param={"useAiType":1}),
+        SendMessage(id=-1, cmd="#wait", param={}),
         SendMessage(21, "14_19", {"num": 10}),
         SendMessage(42, "EU250926_xbr", {"index": 0}),
         SendMessage(42, "EU250926_upgrade", {"index": 0, "type": 0, "petId": i}),
-        SendMessage(42, "SA231229_sl", {"mt": 1, "ids": f"[{i},1,2,{i},1,2,3,4,5]"}),
     )
 
-
+#send={"id":15,"param":{"handler":"HKR200306","chapter":3,"pos":0,"type":99},"cmd":"54_22"}|
 async def run(context) -> tuple[SendResult, ...]:
+    await context.socket.send_xt_message(13, "1222", {"pms": "1"})
     i = await find_storage_i(context, context.params.get("r"))
     context.log(f"仓库查询结果：i={i}")
     return tuple(await execute_messages(

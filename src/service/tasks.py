@@ -40,8 +40,7 @@ class _Run:
     finalizing: bool = False
     stop_reason: str | None = None
     workers: set[asyncio.Task] = field(default_factory=set)
-    group_semaphores: dict = field(default_factory=dict)
-    egress_profiles: dict = field(default_factory=dict)
+    publish_handle: asyncio.TimerHandle | None = None
 
 
 class TaskService:
@@ -56,6 +55,23 @@ class TaskService:
         self._closing = False
         self.sessions.on_log = self._log
         self.sessions.on_blocked = self._blocked
+        self.sessions.on_state = self._session_state
+
+    def _session_state(self, session):
+        run = self._runs.get(self.sessions._claims.get(session.identity))
+        if run is None:
+            return
+        row = next((r for r in run.record["account_results"] if r["account_id"] == session.account_id), None)
+        if row is None:
+            return
+        if session.slot:
+            row.update(egress_group_id=session.egress_group_id, exit_ip=session.exit_ip)
+            for target in run.record.get("server_results", []):
+                if target["account_id"] == session.account_id and target["state"] == "running":
+                    target.update(egress_group_id=session.egress_group_id, exit_ip=session.exit_ip)
+        if session.state in {"waiting_egress", "connecting", "initializing"}:
+            row["state"] = session.state
+        self._publish(run)
 
     def _prepare(self, spec) -> tuple[TaskSpec, list[dict], tuple]:
         spec = spec.model_copy(deep=True) if isinstance(spec, TaskSpec) else TaskSpec.model_validate(spec)
@@ -100,7 +116,7 @@ class TaskService:
         targets = [spec.server_targets[0]] * len(accounts) if spec.probe_staggered else spec.server_targets
         return [{"target_index": index, "server": target.model_dump(),
                  "account_id": accounts[index % len(accounts)]["account_id"],
-                 "egress_group_id": accounts[index % len(accounts)]["egress_group_id"],
+                 "egress_group_id": None,
                  "exit_ip": None, "state": "queued", "started_at": None, "finished_at": None,
                  "error": None, "flash": transport_result(), "h5": transport_result(),
                  **({"scheduled_at": (spec.planned_at + timedelta(milliseconds=100 * index)).isoformat(),
@@ -108,10 +124,20 @@ class TaskService:
                     if spec.probe_staggered else {})}
                 for index, target in enumerate(targets)]
 
-    def _publish(self, run: _Run) -> None:
+    def _flush(self, run):
+        if run.publish_handle is not None:
+            run.publish_handle.cancel()
+            run.publish_handle = None
         self.store.save_task(run.record)
-        # Store applies its credential filter before the event leaves this process.
         self.events.publish("task", self.store.get_task(run.record["task_id"]))
+
+    def _publish(self, run: _Run) -> None:
+        # Coalesce account transitions so a large batch does not synchronously
+        # rewrite its entire result array for every queued/connecting event.
+        if run.record["state"] in _TERMINAL or run.record["state"] == "queued":
+            self._flush(run)
+        elif run.publish_handle is None:
+            run.publish_handle = asyncio.get_running_loop().call_later(.2, self._flush, run)
 
     def _log(self, task_id: str, account_id: str | None, message: str) -> None:
         run = self._runs.get(task_id)
@@ -130,7 +156,7 @@ class TaskService:
             "task_id": task_id, "kind": spec.kind, "state": "queued", "created_at": _now(),
             "started_at": None, "finished_at": None, "spec": _snapshot(spec), "error": None,
             "account_results": [
-                {"account_id": account["account_id"], "egress_group_id": account.get("egress_group_id"),
+                {"account_id": account["account_id"], "egress_group_id": None, "exit_ip": None,
                  "state": "skipped" if account["account_id"] in skipped else "queued",
                  "completed_repetitions": 0,
                  "attempted_repetitions": 0, "skipped_repetitions": 0,
@@ -169,6 +195,9 @@ class TaskService:
         return {"deleted_count": len(task_ids), "task_ids": task_ids}
 
     def get(self, task_id: str) -> dict:
+        run = self._runs.get(task_id)
+        if run is not None:
+            self._flush(run)
         return self.store.get_task(task_id)
 
     def results(self, task_id: str) -> dict:
@@ -226,9 +255,11 @@ class TaskService:
         row["state"] = "connecting"
         self._publish(run)
         await self.sessions.connect(run.record["task_id"], account,
-                                    temporary=run.spec.kind == "execute",
+                                    temporary=run.spec.session_policy == "temporary",
                                     reconnect=run.spec.kind == "reconnect")
         row["state"] = "ready"
+        session = self.sessions._sessions[account["account_id"]]
+        row.update(egress_group_id=session.egress_group_id, exit_ip=session.exit_ip)
 
     async def _execute(self, run: _Run, row: dict) -> None:
         account_id = row["account_id"]
@@ -240,7 +271,7 @@ class TaskService:
         outcome = {"network_write": {"status": "unknown", "count": None}}
         options = dict(repetitions=run.spec.repetitions, repeat_interval=run.spec.repeat_interval,
                        message_delay=run.spec.message_delay,
-                       preserve_current_battle=run.spec.session_policy == "existing")
+                       preserve_current_battle=run.spec.session_policy != "temporary")
         try:
             remote = getattr(context, "execute_steps", None)
             if remote is not None:
@@ -266,36 +297,35 @@ class TaskService:
     async def _one(self, run: _Run, account: dict, row: dict, semaphore, *, prepare_only=False):
         task_id = run.record["task_id"]
         try:
-            async with semaphore, run.group_semaphores[account.get("egress_group_id")]:
-                try:
-                    if run.stop_reason:
-                        return
-                    if run.spec.kind == "disconnect":
-                        await self.sessions.disconnect(account["account_id"])
-                        row["state"] = "succeeded"
-                    else:
-                        if run.spec.kind != "execute" or run.spec.session_policy == "temporary":
-                            await self._connect(run, account, row)
-                        if not prepare_only:
-                            if run.spec.kind == "execute":
+            try:
+                if run.stop_reason:
+                    return
+                if run.spec.kind == "disconnect":
+                    await self.sessions.disconnect(account["account_id"])
+                    row["state"] = "succeeded"
+                else:
+                    if run.spec.kind != "execute" or run.spec.session_policy != "existing":
+                        await self._connect(run, account, row)
+                    if not prepare_only:
+                        if run.spec.kind == "execute":
+                            async with semaphore:
                                 await self._execute(run, row)
-                            else:
-                                row["state"] = "succeeded"
-                except Exception as exc:
-                    self._error(run, row, exc)
-                finally:
-                    # Bounded capacity includes disconnect/cleanup, not just work.
-                    if (not prepare_only and run.spec.kind == "execute"
-                            and run.spec.session_policy == "temporary"):
-                        try:
-                            await self.sessions.disconnect_owned(task_id, account["account_id"])
-                        except Exception as exc:
-                            self._error(run, row, exc)
+                        else:
+                            row["state"] = "succeeded"
+            except Exception as exc:
+                self._error(run, row, exc)
+            finally:
+                if not prepare_only and run.spec.kind == "execute" and run.spec.session_policy == "temporary":
+                    try:
+                        await self.sessions.disconnect_owned(task_id, account["account_id"])
+                    except Exception as exc:
+                        self._error(run, row, exc)
         except asyncio.CancelledError:
             if row["state"] not in _TERMINAL:
                 row["state"] = "interrupted" if run.stop_reason == "interrupted" else "cancelled"
             raise
         finally:
+            self.sessions.release_account(task_id, account)
             self._publish(run)
 
     async def _gather(self, run: _Run, coroutines) -> None:
@@ -319,29 +349,18 @@ class TaskService:
         finally:
             self._publish(run)
 
-    async def _probe_exit(self, run, group):
-        try:
-            run.egress_profiles[group] = await self.sessions.egress.probe(group)
-        except Exception as error:
-            run.egress_profiles[group] = {"error": {"code": "egress_probe_failed",
-                                                    "message": run.redactor.clean(error)}}
-
     async def _probe_account(self, run, account, account_row, semaphore):
         rows = [row for row in run.record["server_results"] if row["account_id"] == account["account_id"]]
         account_row["state"] = "running"
         try:
             for row in rows:
-                async with semaphore, run.group_semaphores[account["egress_group_id"]]:
+                async with semaphore:
                     if run.stop_reason:
                         break
                     row.update(state="running", started_at=_now())
                     self._publish(run)
                     outcome = {}
                     try:
-                        profile = run.egress_profiles[account["egress_group_id"]]
-                        if profile.get("error"):
-                            raise ServiceError(**profile["error"])
-                        row["exit_ip"] = profile["exit_ip"]
                         account_row["network_write"] = {"status": "unknown", "count": None}
                         await self.sessions.probe_server(run.record["task_id"], account, row["server"],
                                                          run.spec.probe_timeout or 15, outcome,
@@ -398,12 +417,9 @@ class TaskService:
             run.record.update(state="running", started_at=_now())
             self._publish(run)
             semaphore = asyncio.Semaphore(run.spec.concurrency)
-            run.group_semaphores = {group: asyncio.Semaphore(limit)
-                                    for group, limit in self.sessions.execution_limits(run.accounts).items()}
             all_online = (run.spec.kind == "execute" and run.spec.session_policy == "temporary"
                           and run.spec.mode == "all_online")
             if run.spec.kind == "server_probe":
-                await self._gather(run, (self._probe_exit(run, group) for group in run.group_semaphores))
                 await self._gather(run, (self._probe_account(run, account, row, semaphore)
                     for account, row in zip(run.accounts, run.record["account_results"])))
                 return

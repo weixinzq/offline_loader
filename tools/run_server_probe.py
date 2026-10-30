@@ -15,7 +15,7 @@ def run(file, output, at, request, *, clock=lambda: datetime.now(timezone.utc), 
         raise ValueError("启动时间必须包含时区且晚于当前时间")
     body = json.loads(file.read_text(encoding="utf-8"))
     body.update(kind="server_probe", planned_at=at.isoformat())
-    checked = request("POST", "/tasks/validate", body)
+    checked = request("POST", "/server-probes/validate", body)
     output.mkdir(mode=0o700)
 
     def save(name, value):
@@ -29,7 +29,7 @@ def run(file, output, at, request, *, clock=lambda: datetime.now(timezone.utc), 
     dispatch_at = at - timedelta(seconds=prepare_seconds)
     while (remaining := (dispatch_at - clock()).total_seconds()) > 0:
         sleep(min(remaining, 1))
-    record = request("POST", "/tasks", body)
+    record = request("POST", "/server-probes", body)
     task_id = record["task_id"]
     save("submission.json", record)
     save("schedule.json", {"state": "submitted", "planned_at": at.isoformat(), "task_id": task_id})

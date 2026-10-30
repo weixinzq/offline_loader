@@ -95,10 +95,10 @@ def serve(
     port: int = typer.Option(8765, "--port", min=1, max=65535),
     frontend_dir: Path | None = typer.Option(None, "--frontend-dir", envvar="AOLA_FRONTEND_DIR",
                                             help="Built browser frontend directory; defaults to frontend/dist."),
-    max_online: int = typer.Option(100, "--max-online", min=1, envvar="AOLA_MAX_ONLINE"),
+    max_online: int = typer.Option(100, "--max-online", min=1, hidden=True, help="Deprecated; capacity is derived from the IP pool."),
     login_concurrency: int | None = typer.Option(None, "--login-concurrency", min=1,
                                                envvar="AOLA_LOGIN_CONCURRENCY",
-                                               help="Global login and initialization limit; defaults to online capacity."),
+                                               help="Global login and initialization limit; defaults to 20."),
 ):
     """Run a single-worker backend; use HTTPS reverse proxying for remote access."""
     import uvicorn
@@ -245,7 +245,7 @@ def servers_probe(ctx: typer.Context,
         if spec.planned_at is not None and spec.planned_at <= datetime.now(timezone.utc):
             raise ValueError("Planned time has already passed")
         body = spec.model_dump(mode="json")
-        checked = await _request(ctx.obj, "POST", "/tasks/validate", body)
+        checked = await _request(ctx.obj, "POST", "/server-probes/validate", body)
         if dry_run:
             return checked
         if spec.planned_at is not None:
@@ -253,7 +253,7 @@ def servers_probe(ctx: typer.Context,
                 await asyncio.sleep(min(remaining, 30))
         else:
             body["planned_at"] = datetime.now(timezone.utc).isoformat()
-        return await _request(ctx.obj, "POST", "/tasks", body)
+        return await _request(ctx.obj, "POST", "/server-probes", body)
 
     _emit(_run(ctx, operation()), ctx.obj)
 
@@ -382,7 +382,7 @@ def egress_list(ctx: typer.Context):
 @egress_app.command("create")
 def egress_create(ctx: typer.Context, name: str = typer.Option(..., "--name"),
                   policy: str = typer.Option(..., "--policy"),
-                  max_online: int = typer.Option(30, "--max-online", min=1, max=100)):
+                  max_online: int = typer.Option(25, "--max-online", min=25, max=25)):
     _call(ctx, "POST", "/egress-groups", {"name": name, "clash_policy": policy, "max_online": max_online})
 
 
@@ -398,9 +398,18 @@ def egress_confirm(ctx: typer.Context, group_id: str):
     """Confirm that the exported process rule is active in Clash."""
     async def operation():
         value = await _request(ctx.obj, "GET", f"/egress-groups/{group_id}")
-        body = {key: value[key] for key in ("name", "clash_policy", "max_online")}
+        body = {key: value[key] for key in ("name", "clash_policy", "max_online", "enabled")}
         return await _request(ctx.obj, "PUT", f"/egress-groups/{group_id}", {**body, "routing_confirmed": True})
     _emit(_run(ctx, operation()), ctx.obj)
+
+
+@egress_app.command("enable")
+def egress_enable(ctx: typer.Context, group_id: str, disable: bool = typer.Option(False, "--disable")):
+    async def update():
+        value = await _request(ctx.obj, "GET", f"/egress-groups/{group_id}")
+        body = {key: value[key] for key in ("name", "clash_policy", "max_online", "routing_confirmed")}
+        return await _request(ctx.obj, "PUT", f"/egress-groups/{group_id}", {**body, "enabled": not disable})
+    _emit(_run(ctx, update()), ctx.obj)
 
 
 @egress_app.command("delete")

@@ -25,7 +25,6 @@ class AccountInput(InputModel):
     password: str = Field(min_length=1, max_length=1000, repr=False)
     char_id: int = Field(default=0, ge=0, strict=True)
     zone_index: int = Field(default=1, ge=0, strict=True)
-    egress_group_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class AccountPatch(InputModel):
@@ -34,21 +33,23 @@ class AccountPatch(InputModel):
     password: str | None = Field(default=None, min_length=1, max_length=1000, repr=False)
     char_id: int | None = Field(default=None, ge=0, strict=True)
     zone_index: int | None = Field(default=None, ge=0, strict=True)
-    egress_group_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class EgressGroupInput(InputModel):
     name: str = Field(min_length=1, max_length=80)
     clash_policy: str = Field(min_length=1, max_length=120)
-    max_online: int = Field(default=30, ge=1, le=100, strict=True)
+    max_online: Literal[25] = 25
     routing_confirmed: bool = False
+    enabled: bool = False
 
     @model_validator(mode="after")
     def validate_names(self):
         self.name, self.clash_policy = self.name.strip(), self.clash_policy.strip()
         if not self.name or not self.clash_policy or any(char in self.clash_policy for char in ",\r\n"):
             raise ValueError("分组名称和 Clash 策略名称无效")
-        if self.clash_policy.upper() in {"DIRECT", "REJECT", "REJECT-DROP", "PASS"}:
+        if self.clash_policy.upper() == "DIRECT":
+            self.clash_policy = "DIRECT"
+        if self.clash_policy.upper() in {"REJECT", "REJECT-DROP", "PASS"}:
             raise ValueError("出口分组需要指定代理节点或策略组")
         return self
 
@@ -110,9 +111,9 @@ class ServerTarget(InputModel):
 class TaskSpec(InputModel):
     kind: Literal["connect", "reconnect", "disconnect", "execute", "server_probe"] = "execute"
     account_ids: list[str] = Field(min_length=1)
-    session_policy: Literal["existing", "temporary"] = "temporary"
+    session_policy: Literal["existing", "temporary", "pooled"] = "pooled"
     mode: Literal["bounded", "all_online"] = "bounded"
-    concurrency: int = Field(default=5, ge=1, le=100, strict=True)
+    concurrency: int = Field(default=5, ge=1, strict=True)
     repetitions: int = Field(default=1, ge=1, strict=True)
     repeat_interval: float = Field(default=0.5, ge=0)
     message_delay: float = Field(default=0.2, ge=0)
@@ -133,6 +134,8 @@ class TaskSpec(InputModel):
         if self.kind not in {"execute", "server_probe"} and self.steps:
             raise ValueError("连接操作不接受执行步骤")
         if self.kind == "server_probe":
+            if "session_policy" not in self.model_fields_set:
+                self.session_policy = "temporary"
             if self.steps and (len(self.steps) != 1 or self.steps[0].kind != "script"):
                 raise ValueError("服务器测试只允许登录后执行一个脚本一次")
             if not self.server_targets:
@@ -164,3 +167,30 @@ class TaskSpec(InputModel):
             if self.server_targets[0].zone_index is None or self.server_targets[0].transport is None:
                 raise ValueError("错峰登录必须明确区服和单一传输方式")
         return self
+
+
+class ScriptTaskInput(InputModel):
+    account_ids: list[str] = Field(min_length=1)
+    script_id: str | None = Field(default=None, min_length=1)
+    steps: list[StepSpec] | None = Field(default=None, min_length=1)
+    repetitions: int = Field(default=1, ge=1, strict=True)
+    repeat_interval: float = Field(default=0.5, ge=0)
+    message_delay: float = Field(default=0.2, ge=0)
+
+    @field_validator("account_ids")
+    @classmethod
+    def unique_accounts(cls, values):
+        if len(values) != len(set(values)):
+            raise ValueError("账号 ID 不可重复")
+        return values
+
+    @model_validator(mode="after")
+    def select_execution(self):
+        if (self.script_id is None) == (self.steps is None):
+            raise ValueError("请选择一个专用脚本或提供一组组合步骤")
+        return self
+
+    def to_spec(self):
+        return TaskSpec(account_ids=self.account_ids, session_policy="pooled", concurrency=len(self.account_ids),
+                        steps=self.steps if self.steps is not None else [ScriptStepSpec(kind="script", script_id=self.script_id)],
+                        repetitions=self.repetitions, repeat_interval=self.repeat_interval, message_delay=self.message_delay)

@@ -11,7 +11,7 @@ from src.messaging.dispatcher import (
     SendResult,
     execute_messages,
 )
-from src.messaging.battle_control import BattleRoundSkipped, begin_round, current_round, reset_round
+from src.game.battle.control import BattleRoundSkipped, begin_round, current_round, reset_round
 from src.messaging.parser import SendMessage
 from src.network.context import AppContext
 from src.scripting.loader import InteractionScript, ScriptExecutionError

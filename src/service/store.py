@@ -121,13 +121,6 @@ class Store:
         with self.engine.begin() as connection:
             connection.execute(accounts.delete().where(accounts.c.account_id == account_id))
 
-    def assign_egress_group(self, account_ids, group_id):
-        with self.engine.begin() as connection:
-            for account_id in account_ids:
-                config = connection.execute(select(accounts.c.config).where(accounts.c.account_id == account_id)).scalar_one()
-                connection.execute(accounts.update().where(accounts.c.account_id == account_id).values(
-                    config={**config, "egress_group_id": group_id}))
-
     def list_egress_groups(self):
         with self.engine.connect() as connection:
             return [{"group_id": row.group_id, **row.config} for row in connection.execute(select(egress_groups))]

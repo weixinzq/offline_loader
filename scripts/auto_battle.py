@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from src.messaging.parser import SendMessage
 from src.messaging.dispatcher import SendResult
-from src.messaging import battle_control
+from src.game.battle import control as battle_control
 from src.network.context import AppContext
 from src.scripting.composer import MessageBatchStep, ScriptStep, execute_combination
 from src.scripting.loader import InteractionScript, ScriptExecutionError

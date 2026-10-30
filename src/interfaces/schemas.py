@@ -30,7 +30,6 @@ class AccountRecord(BaseModel):
     account: str
     char_id: int
     zone_index: int
-    egress_group_id: str | None = None
 
 
 class AccountImportResult(BaseModel):
@@ -43,10 +42,11 @@ class AccountImportResult(BaseModel):
 class SessionRecord(BaseModel):
     account_id: str
     label: str
-    state: Literal["offline", "connecting", "initializing", "ready", "disconnecting"]
+    state: Literal["offline", "waiting_egress", "connecting", "initializing", "ready", "disconnecting"]
     error: str | None
     owner_task_id: str | None
     egress_group_id: str | None = None
+    exit_ip: str | None = None
 
 
 class EgressGroupRecord(BaseModel):
@@ -55,6 +55,9 @@ class EgressGroupRecord(BaseModel):
     clash_policy: str
     max_online: int
     routing_confirmed: bool
+    enabled: bool
+    active: bool
+    waiting_count: int
     online_count: int
     reserved_count: int
     worker_state: str
@@ -132,6 +135,7 @@ class AccountResult(BaseModel):
     business_confirmation: str
     step_results: list[StepResult] = Field(default_factory=list)
     egress_group_id: str | None = None
+    exit_ip: str | None = None
 
     @model_validator(mode="before")
     @classmethod

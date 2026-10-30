@@ -79,6 +79,8 @@ class _Session:
     slot: bool = False
     cleanup: asyncio.Task | None = None
     egress_group_id: str | None = None
+    exit_ip: str | None = None
+    waiter: asyncio.Future | None = None
 
 
 class SessionService:
@@ -87,17 +89,18 @@ class SessionService:
         self.store = store
         self.events = events
         self.connection_factory = connection_factory
-        self.max_online = max_online
-        self.login_concurrency = max_online if login_concurrency is None else login_concurrency
-        if self.max_online < 1 or self.login_concurrency < 1:
+        self.login_concurrency = 20 if login_concurrency is None else login_concurrency
+        if self.login_concurrency < 1:
             raise ValueError("在线容量和登录并发必须为正整数")
         self._login_slots = asyncio.Semaphore(self.login_concurrency)
         self._sessions: dict[str, _Session] = {}
         self._claims: dict[str, str] = {}
         self._claim_accounts: dict[str, str] = {}
-        self._reservations: dict[str, int] = {}
-        self._group_reservations: dict[str, dict] = {}
         self.egress = None
+        self._waiting = []
+        self._turn = 0
+        self._last_used = {}
+        self.on_state = None
         self._lock = asyncio.Lock()
         self._maintenance: set[asyncio.Task] = set()
         self.on_log: Callable[[str, str, str], None] | None = None
@@ -105,13 +108,15 @@ class SessionService:
 
     def _publish(self, session: _Session) -> None:
         self.events.publish("session", self._public(session))
+        if self.on_state:
+            self.on_state(session)
 
     @staticmethod
     def _public(session: _Session) -> dict:
         return {
             "account_id": session.account_id, "state": session.state,
             "error": session.error, "owner_task_id": session.owner_task_id,
-            "egress_group_id": session.egress_group_id,
+            "egress_group_id": session.egress_group_id, "exit_ip": session.exit_ip,
         }
 
     def list(self) -> list[dict]:
@@ -126,33 +131,75 @@ class SessionService:
                 "account_id": account["account_id"], "state": "offline",
                 "error": None, "owner_task_id": None,
             }
-            rows.append({**row, "label": account.get("label", ""), "egress_group_id": account.get("egress_group_id")})
+            rows.append({**row, "label": account.get("label", "")})
         return rows
 
+    @property
+    def waiting_count(self):
+        return sum(not future.done() for _, future in self._waiting)
+
+    @property
+    def max_online(self):
+        return len(self.egress.available()) * 25 if self.egress else 0
+
     def egress_usage(self, group_id):
-        return {"online_count": sum(session.slot and session.egress_group_id == group_id for session in self._sessions.values()),
-                "reserved_count": sum(value.get(group_id, 0) for value in self._group_reservations.values())}
+        return {"online_count": sum(s.slot and s.egress_group_id == group_id for s in self._sessions.values()),
+                "reserved_count": 0}
 
-    def execution_limits(self, accounts):
-        groups = {}
-        for account in accounts:
-            group_id = account.get("egress_group_id")
-            groups[group_id] = self.egress.check(group_id)["max_online"] if group_id else self.max_online
-        return groups
+    def wake(self):
+        # All grants are synchronous on the service event loop: no capacity can be
+        # observed and consumed by two requests between the check and the grant.
+        candidates = self.egress.available() if self.egress else []
+        while self._waiting:
+            session, future = self._waiting[0]
+            if future.done():
+                self._waiting.pop(0)
+                continue
+            usage = {g["exit_ip"]: sum(s.slot and s.exit_ip == g["exit_ip"]
+                                      for s in self._sessions.values()) for g in candidates}
+            available = [g for g in candidates if usage[g["exit_ip"]] < 25]
+            if not available:
+                break
+            group = min(available, key=lambda g: (usage[g["exit_ip"]], self._last_used.get(g["group_id"], 0)))
+            self._waiting.pop(0)
+            self._turn += 1
+            self._last_used[group["group_id"]] = self._turn
+            session.egress_group_id, session.exit_ip = group["group_id"], group["exit_ip"]
+            session.slot = True
+            session.state = "connecting"
+            future.set_result(None)
+            self._publish(session)
+        self.events.publish("egress", {"waiting_count": self.waiting_count})
 
-    def _group_needs(self, spec, accounts):
-        counts = {}
-        for account in accounts:
-            needs = spec.kind == "server_probe" or spec.kind == "execute" and spec.session_policy == "temporary"
-            if spec.kind in {"connect", "reconnect"}:
-                needs = not any(session.slot and session.account_id == account["account_id"] for session in self._sessions.values())
-            if needs:
-                group_id = account.get("egress_group_id")
-                counts[group_id] = counts.get(group_id, 0) + 1
-        if spec.kind in {"execute", "server_probe"} and spec.mode == "bounded":
-            limits = self.execution_limits(accounts)
-            counts = {group: min(count, spec.concurrency, limits[group]) for group, count in counts.items()}
-        return counts
+    async def _lease(self, task_id, account):
+        session = _Session(account["account_id"], account_identity(account), None,
+                           Redactor(self.store, account), state="waiting_egress", owner_task_id=task_id)
+        future = asyncio.get_running_loop().create_future()
+        session.waiter = future
+        self._sessions[session.account_id] = session
+        self._waiting.append((session, future))
+        self._publish(session)
+        self.wake()
+        try:
+            await future
+            return session
+        except BaseException:
+            if (session, future) in self._waiting:
+                self._waiting.remove((session, future))
+            await self._disconnect(session)
+            raise
+        finally:
+            session.waiter = None
+
+    def _connection(self, session, account):
+        config = {k: v for k, v in account.items() if k not in {"account_id", "proxy_url", "egress_group_id"}}
+        config.update(network_mode="system", browser_verification=False,
+                      use_environment_proxy=False, read_user_config=False,
+                      service_account_id=session.account_id, egress_group_id=session.egress_group_id)
+        if getattr(self.store, "directory", None) is not None:
+            config["diagnostic_dir"] = str(self.store.directory / "login-failures")
+        session.connection = self.connection_factory(AccountSpec(account.get("label", session.account_id), config))
+        return session.connection
 
     def is_busy(self, account_id: str) -> bool:
         session = self._sessions.get(account_id)
@@ -179,11 +226,6 @@ class SessionService:
                                     "reason": "连接已断开或尚未初始化完成，已跳过"})
                     continue
             eligible.append(account)
-            group_id = account.get("egress_group_id")
-            if spec.kind == "server_probe" and not group_id:
-                raise ServiceError("egress_required", "服务器测试账号必须属于已确认的代理出口分组", 409)
-            if group_id and spec.kind != "disconnect":
-                self.egress.check(group_id, connecting=True)
             if identity in self._claims:
                 raise ServiceError("account_busy", f"账号“{name}”正被其他任务占用", 409)
             existing = next((item for item in self._sessions.values()
@@ -205,42 +247,37 @@ class SessionService:
         if not eligible:
             names = "、".join(row["label"] for row in skipped)
             raise ServiceError("session_not_ready", f"没有可执行的就绪会话：{names}。请先连接这些账号。", 409)
-        group_needs = self._group_needs(spec, eligible)
-        for group_id, count in group_needs.items():
-            if group_id:
-                group = self.egress.check(group_id)
-                usage = self.egress_usage(group_id)
-                if usage["online_count"] + usage["reserved_count"] + count > group["max_online"]:
-                    raise ServiceError("egress_capacity_exceeded", f"出口分组“{group['name']}”在线及预留连接不能超过 {group['max_online']} 个", 409)
-        needed = sum(group_needs.values())
-        if spec.kind in {"execute", "server_probe"} and spec.mode == "bounded":
-            needed = min(needed, spec.concurrency)
-        used = sum(item.slot for item in self._sessions.values()) + sum(self._reservations.values())
-        if used + needed > self.max_online:
-            raise ServiceError("capacity_exceeded", f"在线及预留连接不能超过 {self.max_online} 个", 409)
+        needed = sum(not (self._sessions.get(a["account_id"]) and
+                          self._sessions[a["account_id"]].slot) for a in eligible)
         return needed, eligible, skipped
 
-    def check(self, spec, accounts: list[dict]) -> dict:
+    def check(self, spec, accounts):
         needed, eligible, skipped = self._check(spec, accounts)
         return {"required_capacity": needed, "max_online": self.max_online,
-                "login_concurrency": self.login_concurrency,
-                "account_count": len(eligible), "skipped_accounts": skipped}
+                "login_concurrency": self.login_concurrency, "account_count": len(eligible),
+                "skipped_accounts": skipped}
 
-    async def reserve(self, task_id: str, spec, accounts: list[dict]) -> list[dict]:
+    async def reserve(self, task_id, spec, accounts):
         async with self._lock:
-            needed, eligible, skipped = self._check(spec, accounts)
+            _, eligible, skipped = self._check(spec, accounts)
             for account in eligible:
                 self._claims[account_identity(account)] = task_id
                 self._claim_accounts[account["account_id"]] = task_id
-            self._reservations[task_id] = needed
-            self._group_reservations[task_id] = self._group_needs(spec, eligible)
             return skipped
 
-    def release(self, task_id: str) -> None:
+    def release_account(self, task_id, account):
+        session = self._sessions.get(account["account_id"])
+        if session and session.slot and session.owner_task_id == task_id:
+            return
+        identity = account_identity(account)
+        if self._claims.get(identity) == task_id:
+            self._claims.pop(identity, None)
+        if self._claim_accounts.get(account["account_id"]) == task_id:
+            self._claim_accounts.pop(account["account_id"], None)
+
+    def release(self, task_id):
         self._claims = {key: owner for key, owner in self._claims.items() if owner != task_id}
         self._claim_accounts = {key: owner for key, owner in self._claim_accounts.items() if owner != task_id}
-        self._reservations.pop(task_id, None)
-        self._group_reservations.pop(task_id, None)
 
     def _log(self, session: _Session, message: object) -> None:
         message = session.redactor.clean(message)
@@ -272,59 +309,46 @@ class SessionService:
 
     async def probe_server(self, task_id, account, target, timeout, outcome, *, steps=(), attempts=1, window=None,
                            start_at=None, start_before=None):
-        if self._claims.get(account_identity(account)) != task_id or not account.get("egress_group_id"):
-            raise ServiceError("account_busy", "探测任务没有代理测试账号的独占权", 409)
-        self.egress.check(account["egress_group_id"], connecting=True)
-        config = dict(account)
-        config.pop("account_id", None)
-        config.pop("proxy_url", None)
-        config.update(network_mode="system", browser_verification=False,
-                      use_environment_proxy=False, read_user_config=False,
-                      service_account_id=account["account_id"],
-                      diagnostic_dir=str(self.store.directory / "login-failures"))
-        connection = self.connection_factory(AccountSpec(account.get("label", account["account_id"]), config))
-        log = lambda message: self.on_log(task_id, account["account_id"], message) if self.on_log else None
-        # Reservations remain held until the worker acknowledges cleanup, including cancellation.
-        async with self._login_slots:
-            await connection.probe_server(target, timeout, outcome, steps=steps, attempts=attempts, log=log, window=window,
-                                          start_at=start_at, start_before=start_before)
+        if self._claims.get(account_identity(account)) != task_id:
+            raise ServiceError("account_busy", "探测任务没有账号独占权", 409)
+        session = await self._lease(task_id, account)
+        try:
+            async with self._login_slots:
+                connection = self._connection(session, account)
+                session.state = "connecting"
+                self._publish(session)
+                log = lambda message: self.on_log(task_id, account["account_id"], message) if self.on_log else None
+                await connection.probe_server(target, timeout, outcome, steps=steps, attempts=attempts,
+                                              log=log, window=window, start_at=start_at, start_before=start_before)
+        finally:
+            await self._disconnect(session)
 
-    async def connect(self, task_id: str, account: dict, *, temporary: bool, reconnect=False):
-        # All batches and child processes share this login/initialization limit.
-        async with self._login_slots:
-            return await self._connect(task_id, account, temporary=temporary, reconnect=reconnect)
-
-    async def _connect(self, task_id: str, account: dict, *, temporary: bool, reconnect=False):
-        account_id = account["account_id"]
-        session = self._sessions.get(account_id)
-        if session is not None and session.slot:
+    async def connect(self, task_id, account, *, temporary=False, reconnect=False):
+        session = self._sessions.get(account["account_id"])
+        if session and session.slot:
             if not reconnect and session.state == "ready" and session.connection.online:
                 return session.connection.context
             if not reconnect:
-                raise ServiceError("session_conflict", "会话已经存在", 409)
-            await self._disconnect(session, retain_slot=True)
-        else:
-            if self._reservations.get(task_id, 0) < 1:
-                raise ServiceError("capacity_exceeded", "任务没有可用连接预留", 409)
-            config = dict(account)
-            config.pop("account_id", None)
-            config.pop("proxy_url", None)
-            config.update(network_mode="system", browser_verification=False,
-                          use_environment_proxy=False, read_user_config=False, service_account_id=account_id)
-            if getattr(self.store, "directory", None) is not None:
-                config["diagnostic_dir"] = str(self.store.directory / "login-failures")
-            session = _Session(account_id, account_identity(account),
-                               self.connection_factory(AccountSpec(account.get("label", account_id), config)),
-                               Redactor(self.store, account), slot=True, egress_group_id=account.get("egress_group_id"))
-            self._reservations[task_id] -= 1
-            self._group_reservations[task_id][session.egress_group_id] -= 1
-            self._sessions[account_id] = session
+                raise ServiceError("session_conflict", "会话正在清理，请先断开或重连", 409)
+            await self._disconnect(session)
+        session = await self._lease(task_id, account)
+        try:
+            async with self._login_slots:
+                self._connection(session, account)
+                return await self._connect(task_id, session, temporary=temporary)
+        except BaseException:
+            await self._disconnect(session)
+            raise
+
+    async def _connect(self, task_id, session, *, temporary=False):
         session.owner_task_id = task_id
         session.state, session.error = "connecting", None
         self._publish(session)
         try:
             connected = await session.connection.connect(retries=1)
             context = session.connection.context
+            if context is not None:
+                context.log_callback = lambda text: self._log(session, text)
             if not connected or context is None:
                 reason = getattr(session.connection, "login_block_reason", "")
                 verification = any(marker in str(reason).casefold() for marker in
@@ -358,7 +382,6 @@ class SessionService:
         except BaseException as exc:
             if not isinstance(exc, asyncio.CancelledError):
                 session.error = session.redactor.clean(exc)
-            await self._disconnect(session)
             raise
 
     def context(self, task_id: str, account_id: str):
@@ -370,11 +393,18 @@ class SessionService:
 
     async def _disconnect(self, session: _Session, *, retain_slot=False) -> None:
         if not session.slot:
+            session.state = "offline"
+            session.owner_task_id = None
+            self._publish(session)
+            self.wake()
             return
         session.state = "disconnecting"
         self._publish(session)
         if session.cleanup is None or session.cleanup.done():
-            session.cleanup = asyncio.create_task(session.connection.disconnect())
+            async def close_connection():
+                if session.connection is not None:
+                    await session.connection.disconnect()
+            session.cleanup = asyncio.create_task(close_connection())
         cleanup = session.cleanup
         interrupted = False
         try:
@@ -387,16 +417,13 @@ class SessionService:
             session.error = session.redactor.clean(exc)
             self._publish(session)
             raise ServiceError("cleanup_failed", session.error) from None
-        if not retain_slot:
-            owner = session.owner_task_id
-            session.slot = False
-            session.owner_task_id = None
-            if owner in self._reservations:
-                self._reservations[owner] += 1
-                group_reservations = self._group_reservations[owner]
-                group_reservations[session.egress_group_id] = group_reservations.get(session.egress_group_id, 0) + 1
+        session.slot = False
+        session.owner_task_id = None
+        session.egress_group_id = None
+        session.exit_ip = None
         session.state = "offline"
         self._publish(session)
+        self.wake()
         if interrupted:
             raise asyncio.CancelledError
 
@@ -413,7 +440,7 @@ class SessionService:
     async def cleanup_task(self, task_id: str) -> None:
         pending = [self._disconnect(session) for session in self._sessions.values()
                    if session.slot and (session.owner_task_id == task_id or (
-                       self._claims.get(session.identity) == task_id and not session.connection.online
+                       self._claims.get(session.identity) == task_id and (session.connection is None or not session.connection.online)
                    ))]
         errors = await asyncio.gather(*pending, return_exceptions=True)
         failures = [error for error in errors if isinstance(error, BaseException)]

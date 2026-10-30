@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.service.application import Application
-from src.service.contracts import AccountInput, AccountPatch, EgressAssignment, EgressGroupInput, MessageSpec, ServiceError, TaskSpec
+from src.service.contracts import AccountInput, AccountPatch, EgressAssignment, EgressGroupInput, MessageSpec, ServiceError, TaskSpec, ScriptTaskInput
 from src.interfaces.schemas import (
     AccountImportResult, AccountRecord, TaskClearResult, ErrorResponse, HealthStatus,
     LogEntry, MessagesValidation, ScriptRecord, SessionRecord, TaskPreflight,
@@ -214,11 +214,23 @@ def create_app(
         return request.app.state.application.scripts.list()
 
     @api.post("/tasks/validate", response_model=TaskPreflight)
-    async def validate_task(body: TaskSpec, request: Request):
-        return request.app.state.application.tasks.validate(body)
+    async def validate_task(body: ScriptTaskInput, request: Request):
+        return request.app.state.application.tasks.validate(body.to_spec())
 
     @api.post("/tasks", status_code=202, response_model=TaskRecord)
-    async def start_task(body: TaskSpec, request: Request):
+    async def start_task(body: ScriptTaskInput, request: Request):
+        return await request.app.state.application.tasks.submit(body.to_spec())
+
+    @api.post("/server-probes/validate", response_model=TaskPreflight)
+    async def validate_probe(body: TaskSpec, request: Request):
+        if body.kind != "server_probe":
+            raise ServiceError("invalid_task", "仅支持服务器探测")
+        return request.app.state.application.tasks.validate(body)
+
+    @api.post("/server-probes", status_code=202, response_model=TaskRecord)
+    async def start_probe(body: TaskSpec, request: Request):
+        if body.kind != "server_probe":
+            raise ServiceError("invalid_task", "仅支持服务器探测")
         return await request.app.state.application.tasks.submit(body)
 
     @api.get("/tasks", response_model=list[TaskRecord])

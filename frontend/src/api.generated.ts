@@ -318,6 +318,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/server-probes/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validate Probe */
+        post: operations["validate_probe_api_v1_server_probes_validate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/server-probes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start Probe */
+        post: operations["start_probe_api_v1_server_probes_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks/{task_id}": {
         parameters: {
             query?: never;
@@ -436,8 +470,6 @@ export interface components {
              * @default 1
              */
             zone_index: number;
-            /** Egress Group Id */
-            egress_group_id?: string | null;
         };
         /** AccountPatch */
         AccountPatch: {
@@ -451,8 +483,6 @@ export interface components {
             char_id?: number | null;
             /** Zone Index */
             zone_index?: number | null;
-            /** Egress Group Id */
-            egress_group_id?: string | null;
         };
         /** AccountRecord */
         AccountRecord: {
@@ -466,8 +496,6 @@ export interface components {
             char_id: number;
             /** Zone Index */
             zone_index: number;
-            /** Egress Group Id */
-            egress_group_id?: string | null;
         };
         /** AccountResult */
         AccountResult: {
@@ -495,6 +523,8 @@ export interface components {
             step_results?: components["schemas"]["StepResult"][];
             /** Egress Group Id */
             egress_group_id?: string | null;
+            /** Exit Ip */
+            exit_ip?: string | null;
         };
         /** ConfigInput */
         ConfigInput: {
@@ -525,14 +555,20 @@ export interface components {
             clash_policy: string;
             /**
              * Max Online
-             * @default 30
+             * @default 25
+             * @constant
              */
-            max_online: number;
+            max_online: 25;
             /**
              * Routing Confirmed
              * @default false
              */
             routing_confirmed: boolean;
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
         };
         /** EgressGroupRecord */
         EgressGroupRecord: {
@@ -546,6 +582,12 @@ export interface components {
             max_online: number;
             /** Routing Confirmed */
             routing_confirmed: boolean;
+            /** Enabled */
+            enabled: boolean;
+            /** Active */
+            active: boolean;
+            /** Waiting Count */
+            waiting_count: number;
             /** Online Count */
             online_count: number;
             /** Reserved Count */
@@ -668,6 +710,30 @@ export interface components {
                 [key: string]: components["schemas"]["JsonValue"];
             };
         };
+        /** ScriptTaskInput */
+        ScriptTaskInput: {
+            /** Account Ids */
+            account_ids: string[];
+            /** Script Id */
+            script_id?: string | null;
+            /** Steps */
+            steps?: (components["schemas"]["MessagesStep"] | components["schemas"]["ScriptStepSpec"])[] | null;
+            /**
+             * Repetitions
+             * @default 1
+             */
+            repetitions: number;
+            /**
+             * Repeat Interval
+             * @default 0.5
+             */
+            repeat_interval: number;
+            /**
+             * Message Delay
+             * @default 0.2
+             */
+            message_delay: number;
+        };
         /** ServerProbeResult */
         ServerProbeResult: {
             /** Target Index */
@@ -733,13 +799,15 @@ export interface components {
              * State
              * @enum {string}
              */
-            state: "offline" | "connecting" | "initializing" | "ready" | "disconnecting";
+            state: "offline" | "waiting_egress" | "connecting" | "initializing" | "ready" | "disconnecting";
             /** Error */
             error: string | null;
             /** Owner Task Id */
             owner_task_id: string | null;
             /** Egress Group Id */
             egress_group_id?: string | null;
+            /** Exit Ip */
+            exit_ip?: string | null;
         };
         /** SkippedAccount */
         SkippedAccount: {
@@ -863,10 +931,10 @@ export interface components {
             account_ids: string[];
             /**
              * Session Policy
-             * @default temporary
+             * @default pooled
              * @enum {string}
              */
-            session_policy: "existing" | "temporary";
+            session_policy: "existing" | "temporary" | "pooled";
             /**
              * Mode
              * @default bounded
@@ -2679,7 +2747,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["TaskSpec"];
+                "application/json": components["schemas"]["ScriptTaskInput"];
             };
         };
         responses: {
@@ -2831,7 +2899,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["TaskSpec"];
+                "application/json": components["schemas"]["ScriptTaskInput"];
             };
         };
         responses: {
@@ -2916,6 +2984,162 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskClearResult"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    validate_probe_api_v1_server_probes_validate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskSpec"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskPreflight"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unprocessable Entity */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Service Unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    start_probe_api_v1_server_probes_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskSpec"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRecord"];
                 };
             };
             /** @description Bad Request */

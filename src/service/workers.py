@@ -109,6 +109,8 @@ class Worker:
             for future in list(self.pending.values()):
                 if not future.done():
                     future.set_exception(ServiceError("worker_lost", reason))
+            if not self.closing and self.pool.on_lost:
+                self.pool.on_lost(self.group_id)
             self.publish()
 
     async def _request(self, operation, account_id=None, data=None, outcome=None):
@@ -287,6 +289,7 @@ class WorkerPool:
         self.module, self.local_factory = module, local_factory
         self.workers = {}
         self.job = None
+        self.on_lost = None
 
     def worker(self, group_id):
         if group_id not in self.workers:
@@ -295,7 +298,9 @@ class WorkerPool:
 
     def connection(self, spec):
         group_id = spec.config.get("egress_group_id")
-        return RemoteAccountConnection(spec, self.worker(group_id)) if group_id else self.local_factory(spec)
+        if not group_id:
+            raise ServiceError("egress_required", "连接必须先取得 IP 池名额", 409)
+        return RemoteAccountConnection(spec, self.worker(group_id))
 
     def profile(self, group_id):
         return self.worker(group_id).profile()
@@ -319,3 +324,4 @@ class WorkerPool:
             if self.job:
                 self.job.close()
                 self.job = None
+        self.on_lost = None

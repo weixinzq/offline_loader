@@ -783,6 +783,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    raise SystemExit("此独立连接入口已停用，请使用统一后台的网页或 CLI，通过 IP 池连接。")
     args = _parse_args()
     from src.ui.runtime_log import configure_runtime_logging
 

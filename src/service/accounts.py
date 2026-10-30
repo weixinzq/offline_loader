@@ -31,8 +31,6 @@ class AccountService:
         try:
             raw = payload.model_dump() if isinstance(payload, AccountInput) else payload
             config = self._normalize(raw)
-            if config.get("egress_group_id"):
-                self.egress.check(config["egress_group_id"])
             self._unique_label(config["label"])
             row = self.store.create_account(config)
         except ValueError as exc:
@@ -52,12 +50,8 @@ class AccountService:
         patch = payload if isinstance(payload, AccountPatch) else AccountPatch.model_validate(payload)
         raw = {key: value for key, value in original.items() if key != "account_id"}
         raw.update(patch.model_dump(exclude_none=True))
-        if "egress_group_id" in patch.model_fields_set:
-            raw["egress_group_id"] = patch.egress_group_id
         try:
             config = self._normalize(raw)
-            if config.get("egress_group_id"):
-                self.egress.check(config["egress_group_id"])
         except ValueError as exc:
             if isinstance(exc, ServiceError):
                 raise
@@ -73,16 +67,7 @@ class AccountService:
         self.events.publish("account", {"account_id": account_id, "deleted": True})
 
     def assign_egress(self, account_ids, group_id):
-        if len(set(account_ids)) != len(account_ids):
-            raise ServiceError("invalid_accounts", "账号 ID 不可重复")
-        if group_id:
-            self.egress.check(group_id)
-        for account_id in account_ids:
-            self.store.get_account(account_id)
-            self._assert_idle(account_id)
-        self.store.assign_egress_group(account_ids, group_id)
-        self.events.publish("account", {"assignment_changed": True})
-        return {"updated": len(account_ids), "egress_group_id": group_id}
+        raise ServiceError("egress_assignment_retired", "账号统一从 IP 池申请出口，不再固定分组", 410)
 
     def import_config(self, config):
         try:
@@ -93,8 +78,6 @@ class AccountService:
                 raise ValueError("duplicate labels")
             for row in inputs:
                 self._unique_label(row["label"])
-                if row.get("egress_group_id"):
-                    self.egress.check(row["egress_group_id"])
         except ValueError as exc:
             raise ServiceError("invalid_import", "导入配置无效或标签重复；原文件未修改") from exc
         rows = [self.create(row) for row in inputs]

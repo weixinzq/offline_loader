@@ -22,6 +22,21 @@ from src.service.worker_process import actual_executable, bind_linux_parent
 from src.network.server_probe import probe_server, transport_result
 
 
+async def detect_exit_ip():
+    # Independent services avoid treating a blocked IP-check endpoint as a broken exit.
+    async with aiohttp.ClientSession(trust_env=False, timeout=aiohttp.ClientTimeout(total=12)) as client:
+        for url, json_response in (("https://api.ipify.org?format=json", True),
+                                   ("https://checkip.amazonaws.com", False)):
+            try:
+                async with client.get(url) as response:
+                    response.raise_for_status()
+                    value = (await response.json())["ip"] if json_response else (await response.text()).strip()
+                    return str(ipaddress.IPv4Address(value))
+            except (aiohttp.ClientError, TimeoutError, ValueError, KeyError):
+                continue
+    raise ServiceError("egress_probe_failed", "出口检测失败，请检查 Clash 规则、节点连接和公网 IP 服务可用性")
+
+
 class WorkerHost:
     def __init__(self, connection_factory=AccountConnection):
         self.factory = connection_factory
@@ -46,14 +61,7 @@ class WorkerHost:
         if operation == "hello":
             return {"pid": os.getpid(), "executable": str(actual_executable())}
         if operation == "probe":
-            try:
-                async with aiohttp.ClientSession(trust_env=False, timeout=aiohttp.ClientTimeout(total=12)) as client:
-                    async with client.get("https://api.ipify.org?format=json") as response:
-                        response.raise_for_status()
-                        result = await response.json()
-                        return {"exit_ip": str(ipaddress.ip_address(result["ip"]))}
-            except (aiohttp.ClientError, TimeoutError, ValueError, KeyError) as error:
-                raise ServiceError("egress_probe_failed", "出口检测失败，请检查 Clash 规则、节点连接和公网 IP 服务可用性") from error
+            return {"exit_ip": await detect_exit_ip()}
         if operation == "cancel":
             target = self.commands.get(data["request_id"])
             if target is not None and target is not asyncio.current_task():

@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Sequence
 
 from src.messaging.parser import SendMessage
-from src.messaging.battle_control import (
+from src.game.battle.control import (
     BattleRoundSkipped, BattleStateError, abort_round, note_sent,
     current_round, wait_for_match, wait_for_end, wait_for_entry, ENTRY_TIMEOUT_SECONDS,
 )
