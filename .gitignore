@@ -18,7 +18,7 @@
 /scripts/test_*.py
 /scripts/verify.py
 /scripts/_fake_mihomo.py
-
+!/Com/**
 # 网页源码及构建依赖
 !/frontend/index.html
 !/frontend/package.json
