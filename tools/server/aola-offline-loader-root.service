@@ -1,0 +1,17 @@
+[Unit]
+Description=Aola single production background service
+After=network-online.target aola-mihomo-root.service
+Wants=network-online.target aola-mihomo-root.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/workspace/offline_loader
+ExecStart=/root/workspace/offline_loader/run-service.sh
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+KillMode=mixed
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

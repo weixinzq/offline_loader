@@ -104,7 +104,6 @@ class SessionService:
         self._lock = asyncio.Lock()
         self._maintenance: set[asyncio.Task] = set()
         self.on_log: Callable[[str, str, str], None] | None = None
-        self.on_blocked: Callable[[str, str], None] | None = None
 
     def _publish(self, session: _Session) -> None:
         self.events.publish("session", self._public(session))
@@ -358,8 +357,6 @@ class SessionService:
                 if reason and any(marker in str(reason).casefold() for marker in
                                   ("429", "频繁", "频率", "限流", "rate limit", "rate_limit", "too many")):
                     blocked_code = "rate_limited"
-                if blocked_code and self.on_blocked is not None:
-                    self.on_blocked(task_id, blocked_code)
                 raise ServiceError(blocked_code or "connection_failed",
                                    session.redactor.clean(session.connection.last_error or "账号连接失败"))
             login_result = getattr(context, "login_result", None)

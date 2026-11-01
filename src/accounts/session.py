@@ -34,18 +34,26 @@ async def authenticate(config: dict, *, interactive: bool = False) -> tuple[Logi
             config.get("register_url") or defaults["register_url"],
         )
     else:
-        result = await http_login(
-            config["account"],
-            config["password"],
-            char_id=int(config.get("char_id", 0)),
-            login_url=config.get("login_url"),
-            register_url=config.get("register_url"),
-            browser_verification=bool(config.get("browser_verification", False)),
-            timeout=float(config.get("timeout", 30)),
-            **({"network_mode": "system", "diagnostic_dir": config.get("diagnostic_dir")}
-               if config.get("network_mode") == "system" else {}),
-            **({"proxy_url": config["proxy_url"]} if config.get("proxy_url") else {}),
-        )
+        for attempt in range(1, 4):
+            result = await http_login(
+                config["account"],
+                config["password"],
+                char_id=int(config.get("char_id", 0)),
+                login_url=config.get("login_url"),
+                register_url=config.get("register_url"),
+                browser_verification=bool(config.get("browser_verification", False)),
+                timeout=float(config.get("timeout", 30)),
+                **({"network_mode": "system", "diagnostic_dir": config.get("diagnostic_dir")}
+                   if config.get("network_mode") == "system" else {}),
+                **({"proxy_url": config["proxy_url"]} if config.get("proxy_url") else {}),
+            )
+            if result.success or result.blocked_reason:
+                break
+            logger.warning("HTTP 认证第 %d/3 次失败，阶段=%s，HTTP状态=%s%s",
+                           attempt, result.http_stage, result.http_status,
+                           "；0.5 秒后重试" if attempt < 3 else "；已用完重试次数")
+            if attempt < 3:
+                await asyncio.sleep(0.5)
     if not result.success:
         if result.blocked_reason:
             raise LoginBlockedError(result.blocked_reason, result.error_msg)

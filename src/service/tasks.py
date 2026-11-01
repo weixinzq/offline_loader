@@ -54,7 +54,6 @@ class TaskService:
         self._runs: dict[str, _Run] = {}
         self._closing = False
         self.sessions.on_log = self._log
-        self.sessions.on_blocked = self._blocked
         self.sessions.on_state = self._session_state
 
     def _session_state(self, session):
@@ -229,27 +228,11 @@ class TaskService:
             run.task = asyncio.create_task(self._finish(run), name=f"cleanup-task-{task_id}")
         return self.get(task_id)
 
-    def _blocked(self, task_id: str, code: str) -> None:
-        run = self._runs.get(task_id)
-        if run is None:
-            return
-        if run.stop_reason is not None:
-            return
-        run.stop_reason = code
-        message = "需要人工验证；该批任务已停止" if code == "verification_required" else "登录受到服务器限制；该批任务已停止"
-        run.record["error"] = {"code": code, "message": message}
-        current = asyncio.current_task()
-        for worker in run.workers:
-            if worker is not current and not worker.done():
-                worker.cancel()
-
     def _error(self, run: _Run, row: dict, exc: Exception) -> None:
         code = getattr(exc, "code", "execution_failed")
         message = run.redactor.clean(exc)
         row.update(state="failed", error={"code": code, "message": message})
         self._log(run.record["task_id"], row["account_id"], message)
-        if code in {"verification_required", "rate_limited", "login_blocked"}:
-            self._blocked(run.record["task_id"], code)
 
     async def _connect(self, run: _Run, account: dict, row: dict) -> None:
         row["state"] = "connecting"
@@ -393,6 +376,11 @@ class TaskService:
                         row.update(state="failed", error={"code": getattr(error, "code", "probe_failed"),
                                                            "message": run.redactor.clean(error)})
                         self._error(run, account_row, error)
+                        if getattr(error, "code", None) in {"verification_required", "rate_limited", "login_blocked"}:
+                            for pending in rows:
+                                if pending["state"] == "queued":
+                                    pending["state"] = "skipped"
+                            break
                     finally:
                         for name in ("flash", "h5"):
                             if name in outcome:

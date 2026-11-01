@@ -41,6 +41,12 @@
 # 通用接口导出和探测工具；具体任务 JSON 不发布
 !/tools/export_openapi.py
 !/tools/run_server_probe.py
+# 正式服务器的稳定入口模板；不包含配置、凭据或发布产物。
+!/tools/server/manage.sh
+!/tools/server/manage.py
+!/tools/server/run-service.sh
+!/tools/server/cli_main.py
+!/tools/server/aola-offline-loader-root.service
 
 # 排除缓存、依赖、构建产物与本地文件（优先于上方源码规则）
 .git/
